@@ -6,6 +6,11 @@ from pathlib import Path
 import base64
 import re
 from datetime import datetime
+import threading
+import http.server
+import socketserver
+from urllib.parse import quote
+import time
 
 # --- Configuration ---
 DATA_DIR = Path("data")
@@ -14,6 +19,34 @@ SEGMENTS_DIR = DATA_DIR / "segments"
 THUMB_DIR = DATA_DIR / "thumbnails"
 DB_PATH = DATA_DIR / "metadata.db"
 
+# HTTP Server for serving video files
+VIDEO_SERVER_PORT = 8502  # Different from Streamlit's default port
+VIDEO_SERVER_STARTED = False
+
+class VideoHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(DATA_DIR), **kwargs)
+    
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        super().end_headers()
+
+def start_video_server():
+    global VIDEO_SERVER_STARTED, VIDEO_SERVER_PORT  # Move global declaration to the top
+    if not VIDEO_SERVER_STARTED:
+        try:
+            handler = VideoHTTPRequestHandler
+            httpd = socketserver.TCPServer(("", VIDEO_SERVER_PORT), handler)
+            server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            server_thread.start()
+            VIDEO_SERVER_STARTED = True
+            time.sleep(0.5)  # Give server time to start
+        except OSError:
+            # Port might be in use, try next port
+            VIDEO_SERVER_PORT += 1
+            start_video_server()
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,12 +77,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def list_recordings():
     return sorted(RECORDINGS_DIR.glob("*.mp4"))
 
-
 def get_video_info(path: Path):
+    # Retrieve duration and frame rate via ffprobe
     cmd = [
         'ffprobe', '-v', 'error',
         '-select_streams', 'v:0',
@@ -68,24 +100,20 @@ def get_video_info(path: Path):
     fps = float(nums[0]) / float(nums[1]) if len(nums) == 2 else float(nums[0])
     return duration, fps
 
-
 def encode_file(path: Path):
     with open(path, 'rb') as f:
         return base64.b64encode(f.read()).decode()
-
 
 def make_thumbnail(video_path: Path, seg_id: int, time_offset: float = 0.1):
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     thumb_path = THUMB_DIR / f"thumb_{seg_id}.png"
     if not thumb_path.exists():
-        cmd = [
+        subprocess.run([
             'ffmpeg', '-y', '-i', str(video_path),
             '-ss', str(time_offset), '-vframes', '1', '-q:v', '2',
             str(thumb_path)
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return encode_file(thumb_path)
-
 
 def main():
     st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide")
@@ -93,13 +121,45 @@ def main():
     RECORDINGS_DIR.mkdir(exist_ok=True)
     SEGMENTS_DIR.mkdir(exist_ok=True)
     init_db()
+    
+    # Start the video server
+    start_video_server()
 
-    # Global CSS for video containers and buttons
+    # Enhanced CSS for video containers and buttons
     st.markdown(
         """
         <style>
-        .video-container { max-width: 100%; margin-bottom: 8px; }
-        .control-button { margin: 2px; padding: 4px 8px; border-radius: 4px; }
+        .video-container { 
+            max-width: 100%; 
+            margin-bottom: 4px; 
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 8px;
+            background: #f8f9fa;
+        }
+        .control-button { 
+            margin: 2px; 
+            padding: 6px 12px; 
+            border-radius: 4px;
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .control-button:hover {
+            background: #0056b3;
+        }
+        video {
+            background-color: #000;
+            border-radius: 4px;
+            width: 100%;
+            height: auto;
+        }
+        .video-controls {
+            margin-top: 8px;
+            text-align: center;
+        }
         </style>
         """, unsafe_allow_html=True
     )
@@ -110,7 +170,6 @@ def main():
         segment_page()
     else:
         browse_page()
-
 
 def segment_page():
     st.header("✂️ Segment & Categorize a Recording")
@@ -130,21 +189,46 @@ def segment_page():
 
     duration, fps = get_video_info(selected)
     step = 1 / fps
-    b64 = encode_file(selected)
+    
+    # Create URL for the video file
+    video_url = f"http://localhost:{VIDEO_SERVER_PORT}/recordings/{quote(selected.name)}"
 
-    # Player with custom controls
-    html = (
-        f"<div class='video-container'>"
-        f"<video id='video' width='100%' controls preload='metadata'>"
-        f"<source src='data:video/mp4;base64,{b64}' type='video/mp4'>"
-        "</video><br>"
-        f"<button class='control-button' onclick=\"document.getElementById('video').playbackRate=0.5\">0.5×</button>"
-        f"<button class='control-button' onclick=\"document.getElementById('video').playbackRate=1\">1×</button>"
-        f"<button class='control-button' onclick=\"var v=document.getElementById('video');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎ Frame</button>"
-        f"<button class='control-button' onclick=\"var v=document.getElementById('video');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">▶︎ Frame</button>"
-        "</div>"
-    )
-    st.components.v1.html(html, height=360)
+    # Enhanced player with better controls
+    html = f"""
+    <div class='video-container'>
+        <video id='mainVideo' width='100%' controls preload='metadata' 
+               onloadedmetadata='this.currentTime=0.01'>
+            <source src='{video_url}' type='video/mp4'>
+            Your browser does not support the video tag.
+        </video>
+        <div class='video-controls'>
+            <button class='control-button' onclick="setPlaybackRate(0.25)">0.25×</button>
+            <button class='control-button' onclick="setPlaybackRate(0.5)">0.5×</button>
+            <button class='control-button' onclick="setPlaybackRate(1)">1×</button>
+            <button class='control-button' onclick="frameStep(-1)">◀︎ Frame</button>
+            <button class='control-button' onclick="frameStep(1)">▶︎ Frame</button>
+            <button class='control-button' onclick="skipTime(-1)">-1s</button>
+            <button class='control-button' onclick="skipTime(1)">+1s</button>
+        </div>
+    </div>
+    <script>
+        function setPlaybackRate(rate) {{
+            document.getElementById('mainVideo').playbackRate = rate;
+        }}
+        
+        function frameStep(direction) {{
+            const video = document.getElementById('mainVideo');
+            const frameTime = {step};
+            video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + (direction * frameTime)));
+        }}
+        
+        function skipTime(seconds) {{
+            const video = document.getElementById('mainVideo');
+            video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
+        }}
+    </script>
+    """
+    st.components.v1.html(html, height=500)
 
     start = st.slider("Start time (s)", 0.0, duration, 0.0, 0.01)
     end = st.slider("End time (s)", 0.0, duration, duration, 0.01)
@@ -163,7 +247,7 @@ def segment_page():
             '-ss', str(start), '-to', str(end),
             '-avoid_negative_ts', 'make_zero', '-c', 'copy',
             '-movflags', '+faststart', str(out_path)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -178,7 +262,6 @@ def segment_page():
         conn.commit()
         conn.close()
         st.success(f"Saved segment {out_name} with bucket {bucket}.")
-
 
 def browse_page():
     st.header("🔍 Browse & Edit Segments")
@@ -208,29 +291,47 @@ def browse_page():
         st.info("No segments found for selected filters.")
         return
 
-    # Use two columns for larger videos
+    # Display in two columns for larger videos
     cols = st.columns(2)
     for idx, (seg_id, rec_file, seg_file, bucket, notes) in enumerate(segments):
         col = cols[idx % 2]
         seg_path = DATA_DIR / seg_file
-        thumb_b64 = make_thumbnail(seg_path, seg_id)
         duration, fps = get_video_info(seg_path)
         step = 1 / fps
-        seg_b64 = encode_file(seg_path)
+        
+        # Create URL for the segment file
+        video_url = f"http://localhost:{VIDEO_SERVER_PORT}/{quote(seg_file)}"
 
         with col:
-            html = (
-                f"<div class='video-container'>"
-                f"<video id='video{seg_id}' width='100%' controls preload='metadata' poster='data:image/png;base64,{thumb_b64}'>"
-                f"<source src='data:video/mp4;base64,{seg_b64}' type='video/mp4'>"
-                "</video><br>"
-                f"<button class='control-button' onclick=\"document.getElementById('video{seg_id}').playbackRate=0.5\">0.5×</button>"
-                f"<button class='control-button' onclick=\"document.getElementById('video{seg_id}').playbackRate=1\">1×</button>"
-                f"<button class='control-button' onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎</button>"
-                f"<button class='control-button' onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">▶︎</button>"
-                "</div>"
-            )
-            st.components.v1.html(html, height=380)
+            html = f"""
+            <div class='video-container'>
+                <video id='video{seg_id}' width='100%' controls preload='metadata' 
+                       onloadedmetadata='this.currentTime=0.01'>
+                    <source src='{video_url}' type='video/mp4'>
+                    Your browser does not support the video tag.
+                </video>
+                <div class='video-controls'>
+                    <button class='control-button' onclick="setPlaybackRate{seg_id}(0.25)">0.25×</button>
+                    <button class='control-button' onclick="setPlaybackRate{seg_id}(0.5)">0.5×</button>
+                    <button class='control-button' onclick="setPlaybackRate{seg_id}(1)">1×</button>
+                    <button class='control-button' onclick="frameStep{seg_id}(-1)">◀︎</button>
+                    <button class='control-button' onclick="frameStep{seg_id}(1)">▶︎</button>
+                </div>
+            </div>
+            <script>
+                function setPlaybackRate{seg_id}(rate) {{
+                    document.getElementById('video{seg_id}').playbackRate = rate;
+                }}
+                
+                function frameStep{seg_id}(direction) {{
+                    const video = document.getElementById('video{seg_id}');
+                    const frameTime = {step};
+                    video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + (direction * frameTime)));
+                }}
+            </script>
+            """
+            st.components.v1.html(html, height=450)
+            
             st.markdown(f"**Bucket:** {bucket}")
             with st.expander("Details"):
                 new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
