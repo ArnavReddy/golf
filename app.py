@@ -71,11 +71,27 @@ def init_db():
             notes         TEXT,
             created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS buckets (
+            id   INTEGER PRIMARY KEY,
+            name TEXT UNIQUE
+        )
+    """)
+    for b in ("driver","hybrid","iron","wedge"):
+        c.execute("INSERT OR IGNORE INTO buckets(name) VALUES(?)", (b,))
     conn.commit()
     conn.close()
 
 def list_recordings():
     return sorted(RECORDINGS_DIR.glob("*.mp4"))
+
+def list_buckets():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name FROM buckets ORDER BY name")
+    names = [row[0] for row in c.fetchall()]
+    conn.close()
+    return names
 
 def get_video_info(path: Path):
     # Retrieve duration and frame rate via ffprobe
@@ -438,13 +454,30 @@ def segment_page():
       <button class="start" onclick="jumpToStart()">↤ Jump to start</button>
       <button class="end"   onclick="jumpToEnd()">Jump to end ↦</button>
     </div>
+
+    <script>
+        window.addEventListener("load", () => {{
+            Streamlit.setFrameHeight(document.documentElement.scrollHeight);
+        }});
+    </script>
     """
 
     # render it all in one iframe
     st.components.v1.html(html, height=1000)
 
+    new_bucket = st.text_input("➕ Add a new bucket type", key="new_bucket")
+    if st.button("Add bucket type"):
+        if new_bucket.strip():
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO buckets(name) VALUES(?)", (new_bucket.strip(),))
+            conn.commit()
+            conn.close()
+            st.success(f"Added bucket type: {new_bucket}")
+
     # Now when the user clicks Save, we fetch the latest from our Flask
-    bucket = st.selectbox("Assign bucket (0=worst, 5=best)", list(range(6)))
+    bucket_names = list_buckets()
+    bucket = st.selectbox("Assign bucket", bucket_names)
     notes  = st.text_input("Notes (optional)")
 
     if st.button("Save Segment"):
@@ -499,7 +532,8 @@ def browse_page():
     recs = c.fetchall()
     dates = sorted({datetime.fromisoformat(r[2]).date() for r in recs}) if recs else []
     selected_date = st.sidebar.selectbox("Filter by date", ["All"] + [d.isoformat() for d in dates])
-    buckets = st.sidebar.multiselect("Filter by bucket", list(range(6)), default=list(range(6)))
+    bucket_names = list_buckets()
+    buckets = st.sidebar.multiselect("Filter by bucket", bucket_names, default=bucket_names)
 
     query = (
         "SELECT s.id, r.filename, s.filename, s.bucket, s.notes "
@@ -510,7 +544,11 @@ def browse_page():
         conds.append("date(r.imported_at)=?")
         params.append(selected_date)
     if buckets:
-        conds.append(f"s.bucket IN ({','.join(map(str,buckets))})")
+        # build a "?,?..." placeholder string matching how many were picked
+        placeholder_str = ",".join("?" for _ in buckets)
+        conds.append(f"s.bucket IN ({placeholder_str})")
+        # extend the params array with the actual bucket *strings*
+        params.extend(buckets)
     if conds:
         query += " WHERE " + " AND ".join(conds)
     c.execute(query, params)
@@ -560,7 +598,28 @@ def browse_page():
                 
                 # Edit controls
                 with st.expander("Edit Details"):
-                    new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
+                    if st.button("🗑️ Delete segment", key=f"delete{seg_id}"):
+                        # 1) delete the file
+                        try:
+                            os.remove(seg_path)
+                        except OSError:
+                            pass
+
+                        # 2) delete the DB row
+                        conn = sqlite3.connect(DB_PATH)
+                        c = conn.cursor()
+                        c.execute("DELETE FROM segments WHERE id=?", (seg_id,))
+                        conn.commit()
+                        conn.close()
+
+                        st.success(f"Deleted segment {seg_id}")
+                        st.rerun()
+                    
+                    try:
+                        idx = bucket_names.index(bucket)
+                    except ValueError:
+                        idx = 0
+                    new_bucket = st.selectbox("Bucket", options=bucket_names, index=idx, key=f"bucket{seg_id}")
                     new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
                     if st.button("Update", key=f"update{seg_id}"):
                         conn = sqlite3.connect(DB_PATH)
@@ -600,7 +659,11 @@ def browse_page():
                 with col1:
                     new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
                 with col2:
-                    new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
+                    try:
+                        idx = bucket_names.index(bucket)
+                    except ValueError:
+                        idx = 0
+                    new_bucket = st.selectbox("Bucket", options=bucket_names, index=idx, key=f"bucket{seg_id}")
                 
                 if st.button("Update", key=f"update{seg_id}"):
                     conn = sqlite3.connect(DB_PATH)
