@@ -6,11 +6,6 @@ from pathlib import Path
 import base64
 import re
 from datetime import datetime
-import threading
-import http.server
-import socketserver
-from urllib.parse import quote
-import time
 
 # --- Configuration ---
 DATA_DIR = Path("data")
@@ -18,35 +13,6 @@ RECORDINGS_DIR = DATA_DIR / "recordings"
 SEGMENTS_DIR = DATA_DIR / "segments"
 THUMB_DIR = DATA_DIR / "thumbnails"
 DB_PATH = DATA_DIR / "metadata.db"
-
-# HTTP Server for serving video files
-VIDEO_SERVER_PORT = 8502  # Different from Streamlit's default port
-VIDEO_SERVER_STARTED = False
-
-class VideoHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(DATA_DIR), **kwargs)
-    
-    def end_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', '*')
-        super().end_headers()
-
-def start_video_server():
-    global VIDEO_SERVER_STARTED, VIDEO_SERVER_PORT  # Move global declaration to the top
-    if not VIDEO_SERVER_STARTED:
-        try:
-            handler = VideoHTTPRequestHandler
-            httpd = socketserver.TCPServer(("", VIDEO_SERVER_PORT), handler)
-            server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            server_thread.start()
-            VIDEO_SERVER_STARTED = True
-            time.sleep(0.5)  # Give server time to start
-        except OSError:
-            # Port might be in use, try next port
-            VIDEO_SERVER_PORT += 1
-            start_video_server()
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -100,20 +66,207 @@ def get_video_info(path: Path):
     fps = float(nums[0]) / float(nums[1]) if len(nums) == 2 else float(nums[0])
     return duration, fps
 
-def encode_file(path: Path):
-    with open(path, 'rb') as f:
-        return base64.b64encode(f.read()).decode()
+def video_to_base64(video_path: Path):
+    """Convert video file to base64 data URI"""
+    with open(video_path, 'rb') as f:
+        video_data = f.read()
+    video_b64 = base64.b64encode(video_data).decode()
+    return f"data:video/mp4;base64,{video_b64}"
 
-def make_thumbnail(video_path: Path, seg_id: int, time_offset: float = 0.1):
-    THUMB_DIR.mkdir(parents=True, exist_ok=True)
-    thumb_path = THUMB_DIR / f"thumb_{seg_id}.png"
-    if not thumb_path.exists():
-        subprocess.run([
-            'ffmpeg', '-y', '-i', str(video_path),
-            '-ss', str(time_offset), '-vframes', '1', '-q:v', '2',
-            str(thumb_path)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return encode_file(thumb_path)
+def create_enhanced_video_player(video_path: Path, video_id: str, fps: float = 30.0):
+    """Create an enhanced video player with frame-by-frame and speed controls"""
+    file_size = video_path.stat().st_size
+    
+    # For files larger than 50MB, show a warning and use file path
+    if file_size > 50 * 1024 * 1024:
+        st.warning(f"Video file is {file_size // (1024*1024)}MB. Large files may not play properly.")
+        # Try to use file:// URL (works in some browsers)
+        video_src = f"file://{video_path.absolute()}"
+    else:
+        # Use base64 encoding for smaller files
+        video_src = video_to_base64(video_path)
+    
+    frame_duration = 1.0 / fps  # Duration of one frame in seconds
+    
+    html = f"""
+    <div style="background: #000; padding: 8px; border-radius: 8px; margin-bottom: 16px;">
+        <video id="{video_id}" width="100%" controls preload="metadata" 
+               style="background: #000; border-radius: 4px;">
+            <source src="{video_src}" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+        
+        <!-- Speed Controls -->
+        <div style="margin-top: 8px; text-align: center;">
+            <strong style="color: white; margin-right: 10px;">Speed:</strong>
+            <button onclick="setSpeed_{video_id}(0.1)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                0.1×
+            </button>
+            <button onclick="setSpeed_{video_id}(0.25)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                0.25×
+            </button>
+            <button onclick="setSpeed_{video_id}(0.5)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                0.5×
+            </button>
+            <button onclick="setSpeed_{video_id}(1)" 
+                    style="margin: 2px; padding: 4px 8px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                1×
+            </button>
+        </div>
+        
+        <!-- Frame Controls -->
+        <div style="margin-top: 8px; text-align: center;">
+            <strong style="color: white; margin-right: 10px;">Frame:</strong>
+            <button onclick="previousFrame_{video_id}()" 
+                    style="margin: 2px; padding: 4px 8px; background: #ff6b35; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                ◀ Prev
+            </button>
+            <button onclick="nextFrame_{video_id}()" 
+                    style="margin: 2px; padding: 4px 8px; background: #ff6b35; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                Next ▶
+            </button>
+            <button onclick="pauseVideo_{video_id}()" 
+                    style="margin: 2px; padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                Pause
+            </button>
+        </div>
+        
+        <!-- Current Time Display -->
+        <div style="margin-top: 8px; text-align: center;">
+            <span id="timeDisplay_{video_id}" style="color: white; font-family: monospace; font-size: 14px;">
+                0.00s
+            </span>
+        </div>
+    </div>
+    
+    <script>
+        (function() {{
+            const video = document.getElementById('{video_id}');
+            const timeDisplay = document.getElementById('timeDisplay_{video_id}');
+            const frameDuration = {frame_duration};
+            
+            // Update time display
+            function updateTimeDisplay() {{
+                if (video && timeDisplay) {{
+                    timeDisplay.textContent = video.currentTime.toFixed(2) + 's';
+                }}
+            }}
+            
+            if (video) {{
+                video.addEventListener('timeupdate', updateTimeDisplay);
+                video.addEventListener('loadedmetadata', updateTimeDisplay);
+            }}
+            
+            // Speed control
+            window.setSpeed_{video_id} = function(rate) {{
+                if (video) {{
+                    video.playbackRate = rate;
+                }}
+            }}
+            
+            // Frame navigation
+            window.previousFrame_{video_id} = function() {{
+                if (video) {{
+                    video.pause();
+                    video.currentTime = Math.max(0, video.currentTime - frameDuration);
+                    updateTimeDisplay();
+                }}
+            }}
+            
+            window.nextFrame_{video_id} = function() {{
+                if (video) {{
+                    video.pause();
+                    video.currentTime = Math.min(video.duration || 0, video.currentTime + frameDuration);
+                    updateTimeDisplay();
+                }}
+            }}
+            
+            window.pauseVideo_{video_id} = function() {{
+                if (video) {{
+                    if (video.paused) {{
+                        video.play();
+                    }} else {{
+                        video.pause();
+                    }}
+                }}
+            }}
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {{
+                // Only if this video is in focus area
+                const rect = video.getBoundingClientRect();
+                const isInView = rect.top >= 0 && rect.top <= window.innerHeight;
+                
+                if (isInView && video) {{
+                    switch(e.key) {{
+                        case 'ArrowLeft':
+                            e.preventDefault();
+                            window.previousFrame_{video_id}();
+                            break;
+                        case 'ArrowRight':
+                            e.preventDefault();
+                            window.nextFrame_{video_id}();
+                            break;
+                        case ' ':
+                            e.preventDefault();
+                            window.pauseVideo_{video_id}();
+                            break;
+                    }}
+                }}
+            }});
+        }})();
+    </script>
+    """
+    return html
+
+def create_simple_video_player(video_path: Path, video_id: str):
+    """Create a simple video player without localhost server"""
+    file_size = video_path.stat().st_size
+    
+    # For files larger than 50MB, show a warning and use file path
+    if file_size > 50 * 1024 * 1024:
+        st.warning(f"Video file is {file_size // (1024*1024)}MB. Large files may not play properly.")
+        # Try to use file:// URL (works in some browsers)
+        video_src = f"file://{video_path.absolute()}"
+    else:
+        # Use base64 encoding for smaller files
+        video_src = video_to_base64(video_path)
+    
+    html = f"""
+    <div style="background: #000; padding: 8px; border-radius: 8px; margin-bottom: 16px;">
+        <video id="{video_id}" width="100%" controls preload="metadata" 
+               style="background: #000; border-radius: 4px;">
+            <source src="{video_src}" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+        <div style="margin-top: 8px; text-align: center;">
+            <button onclick="setSpeed_{video_id}(0.25)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                0.25×
+            </button>
+            <button onclick="setSpeed_{video_id}(0.5)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                0.5×
+            </button>
+            <button onclick="setSpeed_{video_id}(1)" 
+                    style="margin: 2px; padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                1×
+            </button>
+        </div>
+    </div>
+    <script>
+        function setSpeed_{video_id}(rate) {{
+            const video = document.getElementById('{video_id}');
+            if (video) {{
+                video.playbackRate = rate;
+            }}
+        }}
+    </script>
+    """
+    return html
 
 def main():
     st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide")
@@ -121,48 +274,6 @@ def main():
     RECORDINGS_DIR.mkdir(exist_ok=True)
     SEGMENTS_DIR.mkdir(exist_ok=True)
     init_db()
-    
-    # Start the video server
-    start_video_server()
-
-    # Enhanced CSS for video containers and buttons
-    st.markdown(
-        """
-        <style>
-        .video-container { 
-            max-width: 100%; 
-            margin-bottom: 4px; 
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 8px;
-            background: #f8f9fa;
-        }
-        .control-button { 
-            margin: 2px; 
-            padding: 6px 12px; 
-            border-radius: 4px;
-            background: #007bff;
-            color: white;
-            border: none;
-            cursor: pointer;
-            font-size: 12px;
-        }
-        .control-button:hover {
-            background: #0056b3;
-        }
-        video {
-            background-color: #000;
-            border-radius: 4px;
-            width: 100%;
-            height: auto;
-        }
-        .video-controls {
-            margin-top: 8px;
-            text-align: center;
-        }
-        </style>
-        """, unsafe_allow_html=True
-    )
 
     st.sidebar.title("📂 Recordings")
     page = st.sidebar.radio("Navigate", ["Segment", "Browse"])
@@ -188,47 +299,13 @@ def segment_page():
     selected = st.selectbox("Select a recording", recs, format_func=lambda p: p.name)
 
     duration, fps = get_video_info(selected)
-    step = 1 / fps
     
-    # Create URL for the video file
-    video_url = f"http://localhost:{VIDEO_SERVER_PORT}/recordings/{quote(selected.name)}"
-
-    # Enhanced player with better controls
-    html = f"""
-    <div class='video-container'>
-        <video id='mainVideo' width='100%' controls preload='metadata' 
-               onloadedmetadata='this.currentTime=0.01'>
-            <source src='{video_url}' type='video/mp4'>
-            Your browser does not support the video tag.
-        </video>
-        <div class='video-controls'>
-            <button class='control-button' onclick="setPlaybackRate(0.25)">0.25×</button>
-            <button class='control-button' onclick="setPlaybackRate(0.5)">0.5×</button>
-            <button class='control-button' onclick="setPlaybackRate(1)">1×</button>
-            <button class='control-button' onclick="frameStep(-1)">◀︎ Frame</button>
-            <button class='control-button' onclick="frameStep(1)">▶︎ Frame</button>
-            <button class='control-button' onclick="skipTime(-1)">-1s</button>
-            <button class='control-button' onclick="skipTime(1)">+1s</button>
-        </div>
-    </div>
-    <script>
-        function setPlaybackRate(rate) {{
-            document.getElementById('mainVideo').playbackRate = rate;
-        }}
-        
-        function frameStep(direction) {{
-            const video = document.getElementById('mainVideo');
-            const frameTime = {step};
-            video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + (direction * frameTime)));
-        }}
-        
-        function skipTime(seconds) {{
-            const video = document.getElementById('mainVideo');
-            video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
-        }}
-    </script>
-    """
-    st.components.v1.html(html, height=500)
+    # Use Streamlit's built-in video player for segmentation
+    st.video(str(selected))
+    
+    # Show file info
+    file_size = selected.stat().st_size
+    st.info(f"Duration: {duration:.1f}s | FPS: {fps:.1f} | Size: {file_size // (1024*1024)}MB")
 
     start = st.slider("Start time (s)", 0.0, duration, 0.0, 0.01)
     end = st.slider("End time (s)", 0.0, duration, duration, 0.01)
@@ -242,12 +319,14 @@ def segment_page():
         segment_dir.mkdir(parents=True, exist_ok=True)
         out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
         out_path = segment_dir / out_name
-        subprocess.run([
-            'ffmpeg', '-y', '-i', str(selected),
-            '-ss', str(start), '-to', str(end),
-            '-avoid_negative_ts', 'make_zero', '-c', 'copy',
-            '-movflags', '+faststart', str(out_path)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        with st.spinner("Creating segment..."):
+            subprocess.run([
+                'ffmpeg', '-y', '-i', str(selected),
+                '-ss', str(start), '-to', str(end),
+                '-avoid_negative_ts', 'make_zero', '-c', 'copy',
+                '-movflags', '+faststart', str(out_path)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -265,11 +344,15 @@ def segment_page():
 
 def browse_page():
     st.header("🔍 Browse & Edit Segments")
+    
+    # Add info about keyboard shortcuts
+    st.info("💡 **Keyboard Shortcuts:** Use ← → arrow keys for frame navigation, Space to pause/play (when video is in view)")
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id, filename, imported_at FROM recordings ORDER BY imported_at DESC")
     recs = c.fetchall()
-    dates = sorted({datetime.fromisoformat(r[2]).date() for r in recs})
+    dates = sorted({datetime.fromisoformat(r[2]).date() for r in recs}) if recs else []
     selected_date = st.sidebar.selectbox("Filter by date", ["All"] + [d.isoformat() for d in dates])
     buckets = st.sidebar.multiselect("Filter by bucket", list(range(6)), default=list(range(6)))
 
@@ -281,8 +364,10 @@ def browse_page():
     if selected_date != "All":
         conds.append("date(r.imported_at)=?")
         params.append(selected_date)
-    conds.append(f"s.bucket IN ({','.join(map(str,buckets))})")
-    query += " WHERE " + " AND ".join(conds)
+    if buckets:
+        conds.append(f"s.bucket IN ({','.join(map(str,buckets))})")
+    if conds:
+        query += " WHERE " + " AND ".join(conds)
     c.execute(query, params)
     segments = c.fetchall()
     conn.close()
@@ -291,51 +376,87 @@ def browse_page():
         st.info("No segments found for selected filters.")
         return
 
-    # Display in two columns for larger videos
-    cols = st.columns(2)
-    for idx, (seg_id, rec_file, seg_file, bucket, notes) in enumerate(segments):
-        col = cols[idx % 2]
-        seg_path = DATA_DIR / seg_file
-        duration, fps = get_video_info(seg_path)
-        step = 1 / fps
-        
-        # Create URL for the segment file
-        video_url = f"http://localhost:{VIDEO_SERVER_PORT}/{quote(seg_file)}"
-
-        with col:
-            html = f"""
-            <div class='video-container'>
-                <video id='video{seg_id}' width='100%' controls preload='metadata' 
-                       onloadedmetadata='this.currentTime=0.01'>
-                    <source src='{video_url}' type='video/mp4'>
-                    Your browser does not support the video tag.
-                </video>
-                <div class='video-controls'>
-                    <button class='control-button' onclick="setPlaybackRate{seg_id}(0.25)">0.25×</button>
-                    <button class='control-button' onclick="setPlaybackRate{seg_id}(0.5)">0.5×</button>
-                    <button class='control-button' onclick="setPlaybackRate{seg_id}(1)">1×</button>
-                    <button class='control-button' onclick="frameStep{seg_id}(-1)">◀︎</button>
-                    <button class='control-button' onclick="frameStep{seg_id}(1)">▶︎</button>
-                </div>
-            </div>
-            <script>
-                function setPlaybackRate{seg_id}(rate) {{
-                    document.getElementById('video{seg_id}').playbackRate = rate;
-                }}
-                
-                function frameStep{seg_id}(direction) {{
-                    const video = document.getElementById('video{seg_id}');
-                    const frameTime = {step};
-                    video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + (direction * frameTime)));
-                }}
-            </script>
-            """
-            st.components.v1.html(html, height=450)
+    # Enhanced video player option
+    use_enhanced_player = st.sidebar.checkbox("Use Enhanced Video Player", value=True, help="Enables frame-by-frame navigation and more speed options")
+    use_columns = st.sidebar.checkbox("Show in columns", value=True)
+    
+    if use_columns:
+        cols = st.columns(2)
+        for idx, (seg_id, rec_file, seg_file, bucket, notes) in enumerate(segments):
+            col = cols[idx % 2]
+            seg_path = DATA_DIR / seg_file
             
-            st.markdown(f"**Bucket:** {bucket}")
-            with st.expander("Details"):
-                new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
-                new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
+            with col:
+                st.markdown(f"**Segment {seg_id} - Bucket {bucket}**")
+                
+                # Get video info for frame rate
+                try:
+                    original_path = RECORDINGS_DIR / rec_file
+                    if original_path.exists():
+                        _, fps = get_video_info(original_path)
+                    else:
+                        fps = 30.0  # Default fallback
+                except:
+                    fps = 30.0  # Default fallback
+                
+                file_size = seg_path.stat().st_size
+                
+                if use_enhanced_player and file_size < 10 * 1024 * 1024:  # < 10MB, use enhanced player
+                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}", fps)
+                    st.components.v1.html(video_html, height=500)
+                elif file_size < 10 * 1024 * 1024:  # < 10MB, use simple player
+                    video_html = create_simple_video_player(seg_path, f"video{seg_id}")
+                    st.components.v1.html(video_html, height=400)
+                else:
+                    # For larger files, use streamlit's video player
+                    st.video(str(seg_path))
+                    if use_enhanced_player:
+                        st.info("Enhanced controls not available for large files. Use browser's built-in controls.")
+                
+                # Edit controls
+                with st.expander("Edit Details"):
+                    new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
+                    new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
+                    if st.button("Update", key=f"update{seg_id}"):
+                        conn = sqlite3.connect(DB_PATH)
+                        c = conn.cursor()
+                        c.execute("UPDATE segments SET bucket=?, notes=? WHERE id=?", (new_bucket, new_notes, seg_id))
+                        conn.commit()
+                        conn.close()
+                        st.success("Updated segment.")
+                        st.rerun()
+    else:
+        # Single column layout
+        for seg_id, rec_file, seg_file, bucket, notes in segments:
+            seg_path = DATA_DIR / seg_file
+            
+            with st.container():
+                st.markdown(f"### Segment {seg_id} - Bucket {bucket}")
+                
+                # Get video info for frame rate
+                try:
+                    original_path = RECORDINGS_DIR / rec_file
+                    if original_path.exists():
+                        _, fps = get_video_info(original_path)
+                    else:
+                        fps = 30.0  # Default fallback
+                except:
+                    fps = 30.0  # Default fallback
+                
+                if use_enhanced_player:
+                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}", fps)
+                    st.components.v1.html(video_html, height=500)
+                else:
+                    # Use streamlit's video player for single column
+                    st.video(str(seg_path))
+                
+                # Edit controls
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
+                with col2:
+                    new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
+                
                 if st.button("Update", key=f"update{seg_id}"):
                     conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
@@ -343,6 +464,9 @@ def browse_page():
                     conn.commit()
                     conn.close()
                     st.success("Updated segment.")
+                    st.rerun()
+                
+                st.divider()
 
 if __name__ == "__main__":
     main()
