@@ -11,6 +11,7 @@ from datetime import datetime
 DATA_DIR = Path("data")
 RECORDINGS_DIR = DATA_DIR / "recordings"
 SEGMENTS_DIR = DATA_DIR / "segments"
+THUMB_DIR = DATA_DIR / "thumbnails"
 DB_PATH = DATA_DIR / "metadata.db"
 
 
@@ -49,26 +50,59 @@ def list_recordings():
 
 
 def get_video_info(path: Path):
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'format=duration', '-of', 'csv=p=0', str(path)]
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'format=duration',
+        '-of', 'csv=p=0', str(path)
+    ]
     duration = float(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', str(path)]
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=r_frame_rate',
+        '-of', 'csv=p=0', str(path)
+    ]
     rate = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
     nums = re.split(r"[/\\]", rate)
     fps = float(nums[0]) / float(nums[1]) if len(nums) == 2 else float(nums[0])
     return duration, fps
 
 
-def encode_video(path: Path):
+def encode_file(path: Path):
     with open(path, 'rb') as f:
         return base64.b64encode(f.read()).decode()
 
 
+def make_thumbnail(video_path: Path, seg_id: int, time_offset: float = 0.1):
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    thumb_path = THUMB_DIR / f"thumb_{seg_id}.png"
+    if not thumb_path.exists():
+        cmd = [
+            'ffmpeg', '-y', '-i', str(video_path),
+            '-ss', str(time_offset), '-vframes', '1', '-q:v', '2',
+            str(thumb_path)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    return encode_file(thumb_path)
+
+
 def main():
-    st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide")
     DATA_DIR.mkdir(exist_ok=True)
     RECORDINGS_DIR.mkdir(exist_ok=True)
     SEGMENTS_DIR.mkdir(exist_ok=True)
     init_db()
+
+    # Global CSS for video containers and buttons
+    st.markdown(
+        """
+        <style>
+        .video-container { max-width: 100%; margin-bottom: 8px; }
+        .control-button { margin: 2px; padding: 4px 8px; border-radius: 4px; }
+        </style>
+        """, unsafe_allow_html=True
+    )
 
     st.sidebar.title("📂 Recordings")
     page = st.sidebar.radio("Navigate", ["Segment", "Browse"])
@@ -96,19 +130,25 @@ def segment_page():
 
     duration, fps = get_video_info(selected)
     step = 1 / fps
-    b64 = encode_video(selected)
-    player_html = f"<video id=\"video\" width=640 controls preload=\"metadata\">" \
-                  f"<source src=\"data:video/mp4;base64,{b64}\" type=\"video/mp4\">" \
-                  "</video><br/>" \
-                  f"<button onclick=\"document.getElementById('video').playbackRate=0.5\">0.5×</button>" \
-                  f"<button onclick=\"document.getElementById('video').playbackRate=1\">1×</button>" \
-                  f"<button onclick=\"var v=document.getElementById('video');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎ Frame</button>" \
-                  f"<button onclick=\"var v=document.getElementById('video');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">Frame ▶︎</button>"
-    st.components.v1.html(player_html, height=360)
+    b64 = encode_file(selected)
+
+    # Player with custom controls
+    html = (
+        f"<div class='video-container'>"
+        f"<video id='video' width='100%' controls preload='metadata'>"
+        f"<source src='data:video/mp4;base64,{b64}' type='video/mp4'>"
+        "</video><br>"
+        f"<button class='control-button' onclick=\"document.getElementById('video').playbackRate=0.5\">0.5×</button>"
+        f"<button class='control-button' onclick=\"document.getElementById('video').playbackRate=1\">1×</button>"
+        f"<button class='control-button' onclick=\"var v=document.getElementById('video');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎ Frame</button>"
+        f"<button class='control-button' onclick=\"var v=document.getElementById('video');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">▶︎ Frame</button>"
+        "</div>"
+    )
+    st.components.v1.html(html, height=360)
 
     start = st.slider("Start time (s)", 0.0, duration, 0.0, 0.01)
     end = st.slider("End time (s)", 0.0, duration, duration, 0.01)
-    bucket = st.selectbox("Assign bucket (0=worst, 5=best)", options=list(range(6)), index=0)
+    bucket = st.selectbox("Assign bucket (0=worst, 5=best)", list(range(6)))
     notes = st.text_input("Notes (optional)")
 
     if start >= end:
@@ -118,8 +158,12 @@ def segment_page():
         segment_dir.mkdir(parents=True, exist_ok=True)
         out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
         out_path = segment_dir / out_name
-        cmd = ['ffmpeg', '-y', '-i', str(selected), '-ss', str(start), '-to', str(end), '-avoid_negative_ts', 'make_zero', '-c', 'copy', '-movflags', '+faststart', str(out_path)]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        subprocess.run([
+            'ffmpeg', '-y', '-i', str(selected),
+            '-ss', str(start), '-to', str(end),
+            '-avoid_negative_ts', 'make_zero', '-c', 'copy',
+            '-movflags', '+faststart', str(out_path)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -127,7 +171,10 @@ def segment_page():
         c.execute("SELECT id FROM recordings WHERE filename=?", (selected.name,))
         rec_id = c.fetchone()[0]
         rel_path = str(out_path.relative_to(DATA_DIR))
-        c.execute("INSERT INTO segments(recording_id,filename,start_sec,end_sec,bucket,notes) VALUES(?,?,?,?,?,?)", (rec_id, rel_path, start, end, bucket, notes))
+        c.execute(
+            "INSERT INTO segments(recording_id,filename,start_sec,end_sec,bucket,notes) VALUES(?,?,?,?,?,?)",
+            (rec_id, rel_path, start, end, bucket, notes)
+        )
         conn.commit()
         conn.close()
         st.success(f"Saved segment {out_name} with bucket {bucket}.")
@@ -143,7 +190,10 @@ def browse_page():
     selected_date = st.sidebar.selectbox("Filter by date", ["All"] + [d.isoformat() for d in dates])
     buckets = st.sidebar.multiselect("Filter by bucket", list(range(6)), default=list(range(6)))
 
-    query = "SELECT s.id, r.filename, s.filename, s.bucket, s.notes FROM segments s JOIN recordings r ON s.recording_id=r.id"
+    query = (
+        "SELECT s.id, r.filename, s.filename, s.bucket, s.notes "
+        "FROM segments s JOIN recordings r ON s.recording_id=r.id"
+    )
     params, conds = [], []
     if selected_date != "All":
         conds.append("date(r.imported_at)=?")
@@ -158,32 +208,40 @@ def browse_page():
         st.info("No segments found for selected filters.")
         return
 
-    cols = st.columns(3)
+    # Use two columns for larger videos
+    cols = st.columns(2)
     for idx, (seg_id, rec_file, seg_file, bucket, notes) in enumerate(segments):
-        col = cols[idx % 3]
+        col = cols[idx % 2]
         seg_path = DATA_DIR / seg_file
-        b64 = encode_video(seg_path)
-        col.markdown(f"<video width=200 controls preload=\"metadata\"><source src='data:video/mp4;base64,{b64}' type='video/mp4'></video><p>Bucket: {bucket}</p>", unsafe_allow_html=True)
-        with col.expander("Details"):
-            st.markdown(f"**Recording:** {rec_file}")
-            st.markdown(f"**Notes:** {notes or 'None'}")
-            duration, fps = get_video_info(seg_path)
-            step = 1/fps
-            html = f"<video id='video{seg_id}' width=320 controls preload='metadata'><source src='data:video/mp4;base64,{b64}' type='video/mp4'></video><br>"
-            html += f"<button onclick=\"document.getElementById('video{seg_id}').playbackRate=0.5\">0.5×</button>"
-            html += f"<button onclick=\"document.getElementById('video{seg_id}').playbackRate=1\">1×</button>"
-            html += f"<button onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎</button>"
-            html += f"<button onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">▶︎</button>"
-            st.components.v1.html(html, height=400)
-            new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
-            new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
-            if st.button("Update", key=f"update{seg_id}"):
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("UPDATE segments SET bucket=?, notes=? WHERE id=?", (new_bucket, new_notes, seg_id))
-                conn.commit()
-                conn.close()
-                st.success("Updated segment.")
+        thumb_b64 = make_thumbnail(seg_path, seg_id)
+        duration, fps = get_video_info(seg_path)
+        step = 1 / fps
+        seg_b64 = encode_file(seg_path)
+
+        with col:
+            html = (
+                f"<div class='video-container'>"
+                f"<video id='video{seg_id}' width='100%' controls preload='metadata' poster='data:image/png;base64,{thumb_b64}'>"
+                f"<source src='data:video/mp4;base64,{seg_b64}' type='video/mp4'>"
+                "</video><br>"
+                f"<button class='control-button' onclick=\"document.getElementById('video{seg_id}').playbackRate=0.5\">0.5×</button>"
+                f"<button class='control-button' onclick=\"document.getElementById('video{seg_id}').playbackRate=1\">1×</button>"
+                f"<button class='control-button' onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.max(0,v.currentTime-{step});\">◀︎</button>"
+                f"<button class='control-button' onclick=\"var v=document.getElementById('video{seg_id}');v.currentTime=Math.min(v.duration,v.currentTime+{step});\">▶︎</button>"
+                "</div>"
+            )
+            st.components.v1.html(html, height=380)
+            st.markdown(f"**Bucket:** {bucket}")
+            with st.expander("Details"):
+                new_bucket = st.selectbox("Bucket", options=list(range(6)), index=bucket, key=f"bucket{seg_id}")
+                new_notes = st.text_input("Notes", value=notes or "", key=f"notes{seg_id}")
+                if st.button("Update", key=f"update{seg_id}"):
+                    conn = sqlite3.connect(DB_PATH)
+                    c = conn.cursor()
+                    c.execute("UPDATE segments SET bucket=?, notes=? WHERE id=?", (new_bucket, new_notes, seg_id))
+                    conn.commit()
+                    conn.close()
+                    st.success("Updated segment.")
 
 if __name__ == "__main__":
     main()
