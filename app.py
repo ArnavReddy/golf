@@ -303,38 +303,121 @@ def segment_page():
     # -- Video preview --
     video_id = "segment_video"
     video_uri = selected.resolve()
-    start, end = st.slider(
-        "Select segment window (seconds)",
-        min_value=0.0,
-        max_value=duration,
-        value=(0.0, duration),
-        step=0.01,
-        format="%.2f"
-    )
+    # start, end = st.slider(
+    #     "Select segment window (seconds)",
+    #     min_value=0.0,
+    #     max_value=duration,
+    #     value=(0.0, duration),
+    #     step=0.01,
+    #     format="%.2f"
+    # )
     html = create_simple_video_player(video_path=video_uri, video_id=video_id)
-    html = html + f"""
-        <script>
-        window.jump_to = function(t) {{
-            const v = document.getElementById('{video_id}');
-            if (v) v.currentTime = t;
-        }}
-        </script>
-        <div style="display:flex; gap:8px; margin-top:8px;">
-            <button onclick="jump_to({start:.2f})"
-                    style="padding:6px 12px; border:none;
-                            border-radius:4px; background:#007bff;
-                            color:#fff; cursor:pointer;">
-                ↤ Jump to start ({start:.2f}s)
-            </button>
+    html += f'''
+        <!-- noUiSlider CSS & JS -->
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.css"/>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.js"></script>
 
-            <button onclick="jump_to({end:.2f})"
-                    style="padding:6px 12px; border:none;
-                            border-radius:4px; background:#28a745;
-                            color:#fff; cursor:pointer;">
-                Jump to end ({end:.2f}s) ↦
-            </button>
+        <style>
+        /* give the slider horizontal padding */
+        #rangeSlider {{
+            margin: 12px 16px;
+        }}
+        .controls {{
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-top: 8px;
+        }}
+        .controls button {{
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            color: white;
+            font-family: sans-serif;
+        }}
+        .start {{ background: #007bff; }}
+        .end   {{ background: #28a745; }}
+        /* label styling, if you keep displays */
+        .controls span {{
+            font-family: sans-serif;
+            color: #333;
+        }}
+        </style>
+
+        <script>
+        // initial segment bounds
+        window.start = 0.0;
+        window.end   = {duration:.2f};
+
+        // once DOM is ready, build the slider and helpers
+        window.addEventListener('DOMContentLoaded', () => {{
+            const videoEl = document.getElementById('{video_id}');
+            const sliderEl = document.getElementById('rangeSlider');
+
+            // create the dual-handle slider
+            noUiSlider.create(sliderEl, {{
+            start: [0, {duration:.2f}],
+            connect: true,
+            range: {{ min: 0, max: {duration:.2f} }},
+            step: 0.01,
+            tooltips: [true, true],
+            format: {{
+                to: v => parseFloat(v).toFixed(2),
+                from: v => parseFloat(v)
+            }},
+            }});
+
+            // grab the API
+            const slider = sliderEl.noUiSlider;
+
+            // update window.start/end as you drag
+            slider.on('update', (values) => {{
+            window.start = parseFloat(values[0]);
+            window.end   = parseFloat(values[1]);
+            }});
+
+            // helper to move left handle to current video time
+            window.setStartFromVideo = () => {{
+            const t = videoEl.currentTime;
+            slider.set([t, null]);
+            }};
+
+            // helper to move right handle to current video time
+            window.setEndFromVideo = () => {{
+            const t = videoEl.currentTime;
+            slider.set([null, t]);
+            }};
+
+            // jump helpers
+            window.jumpToStart = () => {{ videoEl.currentTime = window.start; }};
+            window.jumpToEnd   = () => {{ videoEl.currentTime = window.end; }};
+        }});
+        </script>
+
+        <!-- the slider bar -->
+        <div id="rangeSlider"></div>
+
+        <!-- set-start / set-end buttons -->
+        <div class="controls">
+        <button class="start" onclick="setStartFromVideo()">
+            Set segment start
+        </button>
+        <button class="end" onclick="setEndFromVideo()">
+            Set segment end
+        </button>
         </div>
-    """
+
+        <!-- jump buttons -->
+        <div class="controls">
+        <button class="start" onclick="jumpToStart()">
+            ↤ Jump to start
+        </button>
+        <button class="end" onclick="jumpToEnd()">
+            Jump to end ↦
+        </button>
+        </div>
+'''
 
     st.components.v1.html(html, height=1000)
 
