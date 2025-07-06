@@ -299,16 +299,45 @@ def segment_page():
     selected = st.selectbox("Select a recording", recs, format_func=lambda p: p.name)
 
     duration, fps = get_video_info(selected)
-    
-    # Use Streamlit's built-in video player for segmentation
-    st.video(str(selected))
-    
-    # Show file info
-    file_size = selected.stat().st_size
-    st.info(f"Duration: {duration:.1f}s | FPS: {fps:.1f} | Size: {file_size // (1024*1024)}MB")
 
-    start = st.slider("Start time (s)", 0.0, duration, 0.0, 0.01)
-    end = st.slider("End time (s)", 0.0, duration, duration, 0.01)
+    # -- Video preview --
+    video_id = "segment_video"
+    video_uri = selected.resolve()
+    start, end = st.slider(
+        "Select segment window (seconds)",
+        min_value=0.0,
+        max_value=duration,
+        value=(0.0, duration),
+        step=0.01,
+        format="%.2f"
+    )
+    html = create_simple_video_player(video_path=video_uri, video_id=video_id)
+    html = html + f"""
+        <script>
+        window.jump_to = function(t) {{
+            const v = document.getElementById('{video_id}');
+            if (v) v.currentTime = t;
+        }}
+        </script>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+            <button onclick="jump_to({start:.2f})"
+                    style="padding:6px 12px; border:none;
+                            border-radius:4px; background:#007bff;
+                            color:#fff; cursor:pointer;">
+                ↤ Jump to start ({start:.2f}s)
+            </button>
+
+            <button onclick="jump_to({end:.2f})"
+                    style="padding:6px 12px; border:none;
+                            border-radius:4px; background:#28a745;
+                            color:#fff; cursor:pointer;">
+                Jump to end ({end:.2f}s) ↦
+            </button>
+        </div>
+    """
+
+    st.components.v1.html(html, height=1000)
+
     bucket = st.selectbox("Assign bucket (0=worst, 5=best)", list(range(6)))
     notes = st.text_input("Notes (optional)")
 
@@ -319,7 +348,7 @@ def segment_page():
         segment_dir.mkdir(parents=True, exist_ok=True)
         out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
         out_path = segment_dir / out_name
-        
+
         with st.spinner("Creating segment..."):
             subprocess.run([
                 'ffmpeg', '-y', '-i', str(selected),
