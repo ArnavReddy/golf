@@ -6,40 +6,71 @@ from pathlib import Path
 import base64
 import re
 from datetime import datetime
+import threading
+import requests                # to fetch from our local server
+from flask import Flask, request, jsonify
 
 # --- Configuration ---
-DATA_DIR = Path("data")
-RECORDINGS_DIR = DATA_DIR / "recordings"
-SEGMENTS_DIR = DATA_DIR / "segments"
-THUMB_DIR = DATA_DIR / "thumbnails"
-DB_PATH = DATA_DIR / "metadata.db"
+DATA_DIR        = Path("data")
+RECORDINGS_DIR  = DATA_DIR / "recordings"
+SEGMENTS_DIR    = DATA_DIR / "segments"
+DB_PATH         = DATA_DIR / "metadata.db"
+FLASK_PORT = 5001 
 
+# --- Flask server to hold start/end in memory ---
+flask_app = Flask(__name__)
+# initialize with zeros; will be overwritten by slider's initial 'update' event
+current_bounds = {"start": 0.0, "end": 0.0}
+
+@flask_app.after_request
+def add_cors(resp):
+    resp.headers["Access-Control-Allow-Origin"]  = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST"
+    return resp
+
+@flask_app.route("/update", methods=["POST"])
+def update_bounds():
+    data = request.get_json() or {}
+    if "start" in data:
+        current_bounds["start"] = float(data["start"])
+    if "end" in data:
+        current_bounds["end"]   = float(data["end"])
+    return jsonify(success=True)
+
+@flask_app.route("/current", methods=["GET"])
+def get_current():
+    return jsonify(current_bounds)
+
+def run_flask():
+    # disable reloader, run in background thread
+    flask_app.run(port=FLASK_PORT, threaded=True, use_reloader=False)
+
+# start Flask in the background
+threading.Thread(target=run_flask, daemon=True).start()
+
+
+# --- Helper functions & DB init ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """
+    c.execute("""
         CREATE TABLE IF NOT EXISTS recordings (
-            id INTEGER PRIMARY KEY,
-            filename TEXT UNIQUE,
+            id          INTEGER PRIMARY KEY,
+            filename    TEXT UNIQUE,
             imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    c.execute(
-        """
+        )""")
+    c.execute("""
         CREATE TABLE IF NOT EXISTS segments (
-            id INTEGER PRIMARY KEY,
-            recording_id INTEGER REFERENCES recordings(id),
-            filename TEXT UNIQUE,
-            start_sec REAL,
-            end_sec REAL,
-            bucket INTEGER,
-            notes TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
+            id            INTEGER PRIMARY KEY,
+            recording_id  INTEGER REFERENCES recordings(id),
+            filename      TEXT UNIQUE,
+            start_sec     REAL,
+            end_sec       REAL,
+            bucket        INTEGER,
+            notes         TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
     conn.commit()
     conn.close()
 
@@ -67,11 +98,9 @@ def get_video_info(path: Path):
     return duration, fps
 
 def video_to_base64(video_path: Path):
-    """Convert video file to base64 data URI"""
-    with open(video_path, 'rb') as f:
-        video_data = f.read()
-    video_b64 = base64.b64encode(video_data).decode()
-    return f"data:video/mp4;base64,{video_b64}"
+    with open(video_path, "rb") as f:
+        data = f.read()
+    return "data:video/mp4;base64," + base64.b64encode(data).decode()
 
 def create_enhanced_video_player(video_path: Path, video_id: str, fps: float = 30.0):
     """Create an enhanced video player with frame-by-frame and speed controls"""
@@ -268,8 +297,18 @@ def create_simple_video_player(video_path: Path, video_id: str):
     """
     return html
 
+# --- Streamlit App ---
 def main():
     st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide")
+    if "flask_thread" not in st.session_state:
+        thread = threading.Thread(
+            target=lambda: flask_app.run(
+                port=FLASK_PORT, threaded=True, use_reloader=False
+            ),
+            daemon=True
+        )
+        thread.start()
+        st.session_state["flask_thread"] = thread
     DATA_DIR.mkdir(exist_ok=True)
     RECORDINGS_DIR.mkdir(exist_ok=True)
     SEGMENTS_DIR.mkdir(exist_ok=True)
@@ -294,165 +333,159 @@ def segment_page():
 
     recs = list_recordings()
     if not recs:
-        st.info("No recordings found. Please upload a .mp4 file.")
+        st.info("No recordings yet; upload a .mp4 file.")
         return
-    selected = st.selectbox("Select a recording", recs, format_func=lambda p: p.name)
 
+    selected = st.selectbox("Select a recording", recs, format_func=lambda p: p.name)
     duration, fps = get_video_info(selected)
 
-    # -- Video preview --
+    # Build the HTML + JS for video, slider, set/jump buttons
     video_id = "segment_video"
     video_uri = selected.resolve()
-    # start, end = st.slider(
-    #     "Select segment window (seconds)",
-    #     min_value=0.0,
-    #     max_value=duration,
-    #     value=(0.0, duration),
-    #     step=0.01,
-    #     format="%.2f"
-    # )
     html = create_simple_video_player(video_path=video_uri, video_id=video_id)
-    html += f'''
-        <!-- noUiSlider CSS & JS -->
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.css"/>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.js"></script>
+    html += f"""
+    <!-- noUiSlider CSS & JS -->
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.css"/>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.js"></script>
 
-        <style>
-        /* give the slider horizontal padding */
-        #rangeSlider {{
-            margin: 12px 16px;
-        }}
-        .controls {{
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            margin-top: 8px;
-        }}
-        .controls button {{
-            padding: 6px 12px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            color: white;
-            font-family: sans-serif;
-        }}
-        .start {{ background: #007bff; }}
-        .end   {{ background: #28a745; }}
-        /* label styling, if you keep displays */
-        .controls span {{
-            font-family: sans-serif;
-            color: #333;
-        }}
-        </style>
+    <style>
+      #rangeSlider {{ margin:12px 16px; }}
+      .controls {{
+        display:flex;
+        gap:8px;
+        align-items:center;
+        margin-top:8px;
+      }}
+      .controls button {{
+        padding:6px 12px;
+        border:none;
+        border-radius:4px;
+        cursor:pointer;
+        color:white;
+        font-family:sans-serif;
+      }}
+      .start {{ background:#007bff; }}
+      .end   {{ background:#28a745; }}
+    </style>
 
-        <script>
-        // initial segment bounds
-        window.start = 0.0;
-        window.end   = {duration:.2f};
+    <script>
+      // initial
+      window.start = 0.0;
+      window.end   = {duration:.2f};
 
-        // once DOM is ready, build the slider and helpers
-        window.addEventListener('DOMContentLoaded', () => {{
-            const videoEl = document.getElementById('{video_id}');
-            const sliderEl = document.getElementById('rangeSlider');
+      window.addEventListener('DOMContentLoaded', () => {{
+        const videoEl  = document.getElementById('{video_id}');
+        const sliderEl = document.getElementById('rangeSlider');
 
-            // create the dual-handle slider
-            noUiSlider.create(sliderEl, {{
-            start: [0, {duration:.2f}],
-            connect: true,
-            range: {{ min: 0, max: {duration:.2f} }},
-            step: 0.01,
-            tooltips: [true, true],
-            format: {{
-                to: v => parseFloat(v).toFixed(2),
-                from: v => parseFloat(v)
-            }},
-            }});
-
-            // grab the API
-            const slider = sliderEl.noUiSlider;
-
-            // update window.start/end as you drag
-            slider.on('update', (values) => {{
-            window.start = parseFloat(values[0]);
-            window.end   = parseFloat(values[1]);
-            }});
-
-            // helper to move left handle to current video time
-            window.setStartFromVideo = () => {{
-            const t = videoEl.currentTime;
-            slider.set([t, null]);
-            }};
-
-            // helper to move right handle to current video time
-            window.setEndFromVideo = () => {{
-            const t = videoEl.currentTime;
-            slider.set([null, t]);
-            }};
-
-            // jump helpers
-            window.jumpToStart = () => {{ videoEl.currentTime = window.start; }};
-            window.jumpToEnd   = () => {{ videoEl.currentTime = window.end; }};
+        const slider = noUiSlider.create(sliderEl, {{
+          start: [0, {duration:.2f}],
+          connect: true,
+          range: {{ min: 0, max: {duration:.2f} }},
+          step: 0.01,
+          tooltips: [true, true],
+          format: {{
+            to: v => parseFloat(v).toFixed(2),
+            from: v => parseFloat(v)
+          }}
         }});
-        </script>
 
-        <!-- the slider bar -->
-        <div id="rangeSlider"></div>
+        // on every update, POST to our Flask
+        slider.on('update', (values) => {{
+          window.start = parseFloat(values[0]);
+          window.end   = parseFloat(values[1]);
+          fetch('http://localhost:{FLASK_PORT}/update', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ start: window.start, end: window.end }})
+          }});
+        }});
 
-        <!-- set-start / set-end buttons -->
-        <div class="controls">
-        <button class="start" onclick="setStartFromVideo()">
-            Set segment start
-        </button>
-        <button class="end" onclick="setEndFromVideo()">
-            Set segment end
-        </button>
-        </div>
+        // set from video
+        window.setStartFromVideo = () => {{
+          const t = videoEl.currentTime;
+          slider.set([t, null]);
+          fetch('http://localhost:{FLASK_PORT}/update', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ start: t }})
+          }});
+        }};
+        window.setEndFromVideo = () => {{
+          const t = videoEl.currentTime;
+          slider.set([null, t]);
+          fetch('http://localhost:{FLASK_PORT}/update', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ end: t }})
+          }});
+        }};
 
-        <!-- jump buttons -->
-        <div class="controls">
-        <button class="start" onclick="jumpToStart()">
-            ↤ Jump to start
-        </button>
-        <button class="end" onclick="jumpToEnd()">
-            Jump to end ↦
-        </button>
-        </div>
-'''
+        // jump helpers (no POST needed)
+        window.jumpToStart = () => {{ videoEl.currentTime = window.start; }};
+        window.jumpToEnd   = () => {{ videoEl.currentTime = window.end; }};
+      }});
+    </script>
 
+    <div id="rangeSlider"></div>
+
+    <div class="controls">
+      <button class="start" onclick="setStartFromVideo()">Set segment start</button>
+      <button class="end"   onclick="setEndFromVideo()">Set segment end</button>
+    </div>
+
+    <div class="controls">
+      <button class="start" onclick="jumpToStart()">↤ Jump to start</button>
+      <button class="end"   onclick="jumpToEnd()">Jump to end ↦</button>
+    </div>
+    """
+
+    # render it all in one iframe
     st.components.v1.html(html, height=1000)
 
+    # Now when the user clicks Save, we fetch the latest from our Flask
     bucket = st.selectbox("Assign bucket (0=worst, 5=best)", list(range(6)))
-    notes = st.text_input("Notes (optional)")
+    notes  = st.text_input("Notes (optional)")
 
-    if start >= end:
-        st.error("Start must be less than end.")
-    elif st.button("Save Segment"):
-        segment_dir = SEGMENTS_DIR / selected.stem
-        segment_dir.mkdir(parents=True, exist_ok=True)
-        out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
-        out_path = segment_dir / out_name
+    if st.button("Save Segment"):
+        try:
+            r = requests.get(f"http://localhost:{FLASK_PORT}/current", timeout=1.0)
+            r.raise_for_status()
+            data = r.json()
+            start, end = data["start"], data["end"]
+        except Exception:
+            st.error("⚠️ Couldn't fetch segment bounds from local server.")
+            return
 
-        with st.spinner("Creating segment..."):
-            subprocess.run([
-                'ffmpeg', '-y', '-i', str(selected),
-                '-ss', str(start), '-to', str(end),
-                '-avoid_negative_ts', 'make_zero', '-c', 'copy',
-                '-movflags', '+faststart', str(out_path)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if start >= end:
+            st.error("Start must be less than end.")
+        else:
+            # create segment
+            segment_dir = SEGMENTS_DIR / selected.stem
+            segment_dir.mkdir(parents=True, exist_ok=True)
+            out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
+            out_path = segment_dir / out_name
+            with st.spinner(f"Creating segment...from {start} to {end}"):
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', str(selected),
+                    '-ss', str(start), '-to', str(end),
+                    '-avoid_negative_ts', 'make_zero', '-c', 'copy',
+                    '-movflags', '+faststart', str(out_path)
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("INSERT OR IGNORE INTO recordings(filename) VALUES(?)", (selected.name,))
-        c.execute("SELECT id FROM recordings WHERE filename=?", (selected.name,))
-        rec_id = c.fetchone()[0]
-        rel_path = str(out_path.relative_to(DATA_DIR))
-        c.execute(
-            "INSERT INTO segments(recording_id,filename,start_sec,end_sec,bucket,notes) VALUES(?,?,?,?,?,?)",
-            (rec_id, rel_path, start, end, bucket, notes)
-        )
-        conn.commit()
-        conn.close()
-        st.success(f"Saved segment {out_name} with bucket {bucket}.")
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO recordings(filename) VALUES(?)", (selected.name,))
+            c.execute("SELECT id FROM recordings WHERE filename=?", (selected.name,))
+            rec_id = c.fetchone()[0]
+            rel_path = str(out_path.relative_to(DATA_DIR))
+            c.execute(
+                "INSERT INTO segments(recording_id,filename,start_sec,end_sec,bucket,notes) VALUES(?,?,?,?,?,?)",
+                (rec_id, rel_path, start, end, bucket, notes)
+            )
+            conn.commit()
+            conn.close()
+            st.success(f"Saved segment {out_name} with bucket {bucket}.")
 
 def browse_page():
     st.header("🔍 Browse & Edit Segments")
