@@ -3,54 +3,19 @@ import os
 import subprocess
 import sqlite3
 from pathlib import Path
-import base64
 import re
 from datetime import datetime
-import threading
-import requests                # to fetch from our local server
-from flask import Flask, request, jsonify
+import tempfile
+import time
+import base64
+import re
 
-# --- Configuration ---
+# --- Configuration (unchanged) ---
 DATA_DIR        = Path("data")
 RECORDINGS_DIR  = DATA_DIR / "recordings"
 SEGMENTS_DIR    = DATA_DIR / "segments"
 DB_PATH         = DATA_DIR / "metadata.db"
-FLASK_PORT = 5001 
 
-# --- Flask server to hold start/end in memory ---
-flask_app = Flask(__name__)
-# initialize with zeros; will be overwritten by slider's initial 'update' event
-current_bounds = {"start": 0.0, "end": 0.0}
-
-@flask_app.after_request
-def add_cors(resp):
-    resp.headers["Access-Control-Allow-Origin"]  = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "GET,POST"
-    return resp
-
-@flask_app.route("/update", methods=["POST"])
-def update_bounds():
-    data = request.get_json() or {}
-    if "start" in data:
-        current_bounds["start"] = float(data["start"])
-    if "end" in data:
-        current_bounds["end"]   = float(data["end"])
-    return jsonify(success=True)
-
-@flask_app.route("/current", methods=["GET"])
-def get_current():
-    return jsonify(current_bounds)
-
-def run_flask():
-    # disable reloader, run in background thread
-    flask_app.run(port=FLASK_PORT, threaded=True, use_reloader=False)
-
-# start Flask in the background
-threading.Thread(target=run_flask, daemon=True).start()
-
-
-# --- Helper functions & DB init ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -89,9 +54,30 @@ def list_buckets():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT name FROM buckets ORDER BY name")
-    names = [row[0] for row in c.fetchall()]
+    names = [r[0] for r in c.fetchall()]
     conn.close()
     return names
+
+def parse_timestamp(ts: str) -> float:
+    parts = ts.strip().split(":")
+    if not parts or len(parts) > 3:
+        raise ValueError("Invalid timestamp format")
+    # pad to [HH, MM, SS]
+    parts = [float(p) for p in parts]
+    if len(parts) == 1:
+        hours, mins, secs = 0, 0, parts[0]
+    elif len(parts) == 2:
+        hours, mins, secs = 0, parts[0], parts[1]
+    else:
+        hours, mins, secs = parts
+    return hours * 3600 + mins * 60 + secs
+
+def format_timestamp(seconds: float) -> str:
+    """Format a float seconds into HH:MM:SS (zero-padded)."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:05.2f}"  # SS.ss with two decimals
 
 def get_video_info(path: Path):
     # Retrieve duration and frame rate via ffprobe
@@ -118,29 +104,20 @@ def video_to_base64(video_path: Path):
         data = f.read()
     return "data:video/mp4;base64," + base64.b64encode(data).decode()
 
-def create_enhanced_video_player(video_path: Path, video_id: str, fps: float = 30.0):
+def create_enhanced_video_player(video_path: Path, video_id: str):
     """Create an enhanced video player with frame-by-frame and speed controls"""
-    file_size = video_path.stat().st_size
+    video_src = video_to_base64(video_path)
     
-    # For files larger than 50MB, show a warning and use file path
-    if file_size > 50 * 1024 * 1024:
-        st.warning(f"Video file is {file_size // (1024*1024)}MB. Large files may not play properly.")
-        # Try to use file:// URL (works in some browsers)
-        video_src = f"file://{video_path.absolute()}"
-    else:
-        # Use base64 encoding for smaller files
-        video_src = video_to_base64(video_path)
-    
-    frame_duration = 1.0 / fps  # Duration of one frame in seconds
+    frame_duration = 1.0 / 30  # Duration of one frame in seconds
     
     html = f"""
+    <script>
+        (function() {{
+            window._prevInterval_{video_id} = null;
+            window._nextInterval_{video_id} = null;
+        }})
+    </script>
     <div style="background: #000; padding: 8px; border-radius: 8px; margin-bottom: 16px;">
-        <video id="{video_id}" width="100%" controls preload="metadata" 
-               style="background: #000; border-radius: 4px;">
-            <source src="{video_src}" type="video/mp4">
-            Your browser does not support the video tag.
-        </video>
-        
         <!-- Speed Controls -->
         <div style="margin-top: 8px; text-align: center;">
             <strong style="color: white; margin-right: 10px;">Speed:</strong>
@@ -165,11 +142,18 @@ def create_enhanced_video_player(video_path: Path, video_id: str, fps: float = 3
         <!-- Frame Controls -->
         <div style="margin-top: 8px; text-align: center;">
             <strong style="color: white; margin-right: 10px;">Frame:</strong>
-            <button onclick="previousFrame_{video_id}()" 
+            <button 
+                    onclick="previousFrame_{video_id}()"
+                    onmousedown="window._prevInterval_{video_id} = setInterval(previousFrame_{video_id}, 150)"
+                    onmouseup="clearInterval(window._prevInterval_{video_id})"
+                    onmouseleave="clearInterval(window._prevInterval_{video_id})"
                     style="margin: 2px; padding: 4px 8px; background: #ff6b35; color: white; border: none; border-radius: 4px; cursor: pointer;">
                 ◀ Prev
             </button>
             <button onclick="nextFrame_{video_id}()" 
+                    onmousedown="window._nextInterval_{video_id} = setInterval(nextFrame_{video_id}, 150)"
+                    onmouseup="clearInterval(window._nextInterval_{video_id})"
+                    onmouseleave="clearInterval(window._nextInterval_{video_id})"
                     style="margin: 2px; padding: 4px 8px; background: #ff6b35; color: white; border: none; border-radius: 4px; cursor: pointer;">
                 Next ▶
             </button>
@@ -185,6 +169,11 @@ def create_enhanced_video_player(video_path: Path, video_id: str, fps: float = 3
                 0.00s
             </span>
         </div>
+        <video id="{video_id}" width="100%" controls preload="metadata" 
+               style="background: #000; border-radius: 4px;">
+            <source src="{video_src}" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
     </div>
     
     <script>
@@ -316,15 +305,6 @@ def create_simple_video_player(video_path: Path, video_id: str):
 # --- Streamlit App ---
 def main():
     st.set_page_config(page_title="Slomo Golf Clip Manager", layout="wide")
-    if "flask_thread" not in st.session_state:
-        thread = threading.Thread(
-            target=lambda: flask_app.run(
-                port=FLASK_PORT, threaded=True, use_reloader=False
-            ),
-            daemon=True
-        )
-        thread.start()
-        st.session_state["flask_thread"] = thread
     DATA_DIR.mkdir(exist_ok=True)
     RECORDINGS_DIR.mkdir(exist_ok=True)
     SEGMENTS_DIR.mkdir(exist_ok=True)
@@ -339,186 +319,135 @@ def main():
 
 def segment_page():
     st.header("✂️ Segment & Categorize a Recording")
+
+    # — Upload & select recording —
     uploaded = st.file_uploader("Upload a .mp4 recording", type=["mp4"])
     if uploaded:
         save_path = RECORDINGS_DIR / uploaded.name
+        save_path.parent.mkdir(exist_ok=True, parents=True)
         if not save_path.exists():
-            with open(save_path, 'wb') as f:
-                f.write(uploaded.getbuffer())
+            save_path.write_bytes(uploaded.getbuffer())
             st.success(f"Saved recording: {uploaded.name}")
 
     recs = list_recordings()
     if not recs:
-        st.info("No recordings yet; upload a .mp4 file.")
+        st.info("No recordings yet; upload one above.")
         return
 
     selected = st.selectbox("Select a recording", recs, format_func=lambda p: p.name)
     duration, fps = get_video_info(selected)
+    frame_delta = 1.0 / fps
 
-    # Build the HTML + JS for video, slider, set/jump buttons
-    video_id = "segment_video"
-    video_uri = selected.resolve()
-    html = create_simple_video_player(video_path=video_uri, video_id=video_id)
-    html += f"""
-    <!-- noUiSlider CSS & JS -->
-    <link rel="stylesheet"
-          href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.css"/>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/14.7.0/nouislider.min.js"></script>
+    # — Show original video & meta —
+    st.video(str(selected), width = 500)
+    size_mb = selected.stat().st_size / (1024*1024)
+    st.info(f"Duration: {duration:.2f}s | Size: {size_mb:.1f}MB | FPS: {fps:.1f}")
+    start_ts = "00:00:00"
+    end_ts = format_timestamp(duration)
 
-    <style>
-      #rangeSlider {{ margin:12px 16px; }}
-      .controls {{
-        display:flex;
-        gap:8px;
-        align-items:center;
-        margin-top:8px;
-      }}
-      .controls button {{
-        padding:6px 12px;
-        border:none;
-        border-radius:4px;
-        cursor:pointer;
-        color:white;
-        font-family:sans-serif;
-      }}
-      .start {{ background:#007bff; }}
-      .end   {{ background:#28a745; }}
-    </style>
+    # — Controls for Start and End with frame & 0.5s jumps —
+    col_s, col_e = st.columns(2)
+    with col_s:
+        start_ts = st.text_input(
+            "Start (HH:MM:SS)", value=start_ts, key="start_ts"
+        )
+    with col_e:
+        end_ts = st.text_input(
+            "End (HH:MM:SS)", value=end_ts, key="end_ts"
+        )
 
-    <script>
-      // initial
-      window.start = 0.0;
-      window.end   = {duration:.2f};
+    # — Parse & validate —
+    parse_error = None
+    try:
+        start = parse_timestamp(start_ts)
+        end   = parse_timestamp(end_ts)
+        if start < 0 or end < 0 or start > duration or end > duration:
+            parse_error = "Timestamps must be between 00:00:00 and video length."
+        elif start >= end:
+            parse_error = "Start must be less than end."
+    except ValueError:
+        parse_error = "Invalid timestamp format—use HH:MM:SS, MM:SS or SS."
 
-      window.addEventListener('DOMContentLoaded', () => {{
-        const videoEl  = document.getElementById('{video_id}');
-        const sliderEl = document.getElementById('rangeSlider');
+    if parse_error:
+        st.error(parse_error)
+        return
+    else:
+        st.markdown(f"**Segment window:** {format_timestamp(start)} → {format_timestamp(end)}")
 
-        const slider = noUiSlider.create(sliderEl, {{
-          start: [0, {duration:.2f}],
-          connect: true,
-          range: {{ min: 0, max: {duration:.2f} }},
-          step: 0.01,
-          tooltips: [true, true],
-          format: {{
-            to: v => parseFloat(v).toFixed(2),
-            from: v => parseFloat(v)
-          }}
-        }});
 
-        // on every update, POST to our Flask
-        slider.on('update', (values) => {{
-          window.start = parseFloat(values[0]);
-          window.end   = parseFloat(values[1]);
-          fetch('http://localhost:{FLASK_PORT}/update', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ start: window.start, end: window.end }})
-          }});
-        }});
+    # — Preview button & inline player —
+    if st.button("▶️ Preview Segment"):
+        preview_dir = DATA_DIR / "previews"
+        preview_dir.mkdir(exist_ok=True, parents=True)
+        start_ms = int(start * 1000)
+        end_ms   = int(end   * 1000)
+        preview_name = f"{selected.stem}_{start_ms}_{end_ms}.mp4"
+        preview_path = preview_dir / preview_name
 
-        // set from video
-        window.setStartFromVideo = () => {{
-          const t = videoEl.currentTime;
-          slider.set([t, null]);
-          fetch('http://localhost:{FLASK_PORT}/update', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ start: t }})
-          }});
-        }};
-        window.setEndFromVideo = () => {{
-          const t = videoEl.currentTime;
-          slider.set([null, t]);
-          fetch('http://localhost:{FLASK_PORT}/update', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ end: t }})
-          }});
-        }};
+        # only re-create if not already there (fast replay)
+        if not preview_path.exists():
+            with st.spinner("Creating preview…"):
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", str(selected),
+                    "-ss", str(start),        # seek before input
+                    "-t",  f"{end-start:.3f}", # duration of segment
+                    # re-encode for accurate seeking
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    str(preview_path)
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        st.video(str(preview_path), width = 200)
 
-        // jump helpers (no POST needed)
-        window.jumpToStart = () => {{ videoEl.currentTime = window.start; }};
-        window.jumpToEnd   = () => {{ videoEl.currentTime = window.end; }};
-      }});
-    </script>
+    # — Bucket & notes & final save —
+    new_bucket = st.text_input("➕ Add a new bucket", key="new_bucket")
+    if st.button("Add bucket"):
+        b = new_bucket.strip()
+        if b:
+            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO buckets(name) VALUES(?)", (b,))
+            conn.commit(); conn.close()
+            st.success(f"Added bucket: {b}")
+            st.experimental_rerun()
 
-    <div id="rangeSlider"></div>
-
-    <div class="controls">
-      <button class="start" onclick="setStartFromVideo()">Set segment start</button>
-      <button class="end"   onclick="setEndFromVideo()">Set segment end</button>
-    </div>
-
-    <div class="controls">
-      <button class="start" onclick="jumpToStart()">↤ Jump to start</button>
-      <button class="end"   onclick="jumpToEnd()">Jump to end ↦</button>
-    </div>
-
-    <script>
-        window.addEventListener("load", () => {{
-            Streamlit.setFrameHeight(document.documentElement.scrollHeight);
-        }});
-    </script>
-    """
-
-    # render it all in one iframe
-    st.components.v1.html(html, height=1000)
-
-    new_bucket = st.text_input("➕ Add a new bucket type", key="new_bucket")
-    if st.button("Add bucket type"):
-        if new_bucket.strip():
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("INSERT OR IGNORE INTO buckets(name) VALUES(?)", (new_bucket.strip(),))
-            conn.commit()
-            conn.close()
-            st.success(f"Added bucket type: {new_bucket}")
-
-    # Now when the user clicks Save, we fetch the latest from our Flask
-    bucket_names = list_buckets()
-    bucket = st.selectbox("Assign bucket", bucket_names)
+    bucket = st.selectbox("Assign bucket", list_buckets())
     notes  = st.text_input("Notes (optional)")
 
     if st.button("Save Segment"):
-        try:
-            r = requests.get(f"http://localhost:{FLASK_PORT}/current", timeout=1.0)
-            r.raise_for_status()
-            data = r.json()
-            start, end = data["start"], data["end"]
-        except Exception:
-            st.error("⚠️ Couldn't fetch segment bounds from local server.")
-            return
-
-        if start >= end:
+        s, e = start, end
+        start_ms = int(s * 1000)
+        end_ms   = int(e   * 1000)
+        if s >= e:
             st.error("Start must be less than end.")
         else:
-            # create segment
             segment_dir = SEGMENTS_DIR / selected.stem
-            segment_dir.mkdir(parents=True, exist_ok=True)
-            out_name = f"seg_{int(start*1000)}_{int(end*1000)}.mp4"
+            segment_dir.mkdir(exist_ok=True, parents=True)
+            out_name = f"seg_{start_ms}_{end_ms}.mp4"
             out_path = segment_dir / out_name
-            with st.spinner(f"Creating segment...from {start} to {end}"):
+            with st.spinner(f"Writing segment…"):
                 subprocess.run([
-                    'ffmpeg', '-y', '-i', str(selected),
-                    '-ss', str(start), '-to', str(end),
-                    '-avoid_negative_ts', 'make_zero', '-c', 'copy',
-                    '-movflags', '+faststart', str(out_path)
+                    "ffmpeg", "-y",
+                    "-i", str(selected),
+                    "-ss", str(s),        # seek before input
+                    "-t",  f"{e-s:.3f}", # duration of segment
+                    # re-encode for accurate seeking
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    str(out_path)
                 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
+            # record in DB
+            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
             c.execute("INSERT OR IGNORE INTO recordings(filename) VALUES(?)", (selected.name,))
             c.execute("SELECT id FROM recordings WHERE filename=?", (selected.name,))
             rec_id = c.fetchone()[0]
             rel_path = str(out_path.relative_to(DATA_DIR))
             c.execute(
                 "INSERT INTO segments(recording_id,filename,start_sec,end_sec,bucket,notes) VALUES(?,?,?,?,?,?)",
-                (rec_id, rel_path, start, end, bucket, notes)
+                (rec_id, rel_path, s, e, bucket, notes)
             )
-            conn.commit()
-            conn.close()
-            st.success(f"Saved segment {out_name} with bucket {bucket}.")
+            conn.commit(); conn.close()
+            st.success(f"Saved segment {out_name} in bucket '{bucket}'!")
 
 def browse_page():
     st.header("🔍 Browse & Edit Segments")
@@ -572,29 +501,14 @@ def browse_page():
             with col:
                 st.markdown(f"**Segment {seg_id} - Bucket {bucket}**")
                 
-                # Get video info for frame rate
-                try:
-                    original_path = RECORDINGS_DIR / rec_file
-                    if original_path.exists():
-                        _, fps = get_video_info(original_path)
-                    else:
-                        fps = 30.0  # Default fallback
-                except:
-                    fps = 30.0  # Default fallback
-                
                 file_size = seg_path.stat().st_size
                 
-                if use_enhanced_player and file_size < 10 * 1024 * 1024:  # < 10MB, use enhanced player
-                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}", fps)
+                if use_enhanced_player:
+                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}")
                     st.components.v1.html(video_html, height=500)
-                elif file_size < 10 * 1024 * 1024:  # < 10MB, use simple player
+                else:  # < 10MB, use simple player
                     video_html = create_simple_video_player(seg_path, f"video{seg_id}")
                     st.components.v1.html(video_html, height=400)
-                else:
-                    # For larger files, use streamlit's video player
-                    st.video(str(seg_path))
-                    if use_enhanced_player:
-                        st.info("Enhanced controls not available for large files. Use browser's built-in controls.")
                 
                 # Edit controls
                 with st.expander("Edit Details"):
@@ -637,18 +551,8 @@ def browse_page():
             with st.container():
                 st.markdown(f"### Segment {seg_id} - Bucket {bucket}")
                 
-                # Get video info for frame rate
-                try:
-                    original_path = RECORDINGS_DIR / rec_file
-                    if original_path.exists():
-                        _, fps = get_video_info(original_path)
-                    else:
-                        fps = 30.0  # Default fallback
-                except:
-                    fps = 30.0  # Default fallback
-                
                 if use_enhanced_player:
-                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}", fps)
+                    video_html = create_enhanced_video_player(seg_path, f"video{seg_id}")
                     st.components.v1.html(video_html, height=500)
                 else:
                     # Use streamlit's video player for single column
@@ -675,6 +579,15 @@ def browse_page():
                     st.rerun()
                 
                 st.divider()
+
+def main():
+    st.sidebar.title("📂 Recordings")
+    page = st.sidebar.radio("Navigate", ["Segment", "Browse"])
+    init_db()
+    if page == "Segment":
+        segment_page()
+    else:
+        browse_page()
 
 if __name__ == "__main__":
     main()
