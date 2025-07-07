@@ -3,3 +3,5 @@ data
 .DS_store
 compressed
 uncompressed
+export*
+swings
