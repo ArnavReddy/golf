@@ -408,7 +408,6 @@ def segment_page():
             c.execute("INSERT OR IGNORE INTO buckets(name) VALUES(?)", (b,))
             conn.commit(); conn.close()
             st.success(f"Added bucket: {b}")
-            st.experimental_rerun()
 
     bucket = st.selectbox("Assign bucket", list_buckets())
     notes  = st.text_input("Notes (optional)")
@@ -462,7 +461,7 @@ def browse_page():
     dates = sorted({datetime.fromisoformat(r[2]).date() for r in recs}) if recs else []
     selected_date = st.sidebar.selectbox("Filter by date", ["All"] + [d.isoformat() for d in dates])
     bucket_names = list_buckets()
-    buckets = st.sidebar.multiselect("Filter by bucket", bucket_names, default=bucket_names)
+    buckets = st.sidebar.multiselect("Filter by bucket", bucket_names, default=None)
 
     query = (
         "SELECT s.id, r.filename, s.filename, s.bucket, s.notes "
@@ -484,7 +483,7 @@ def browse_page():
     segments = c.fetchall()
     conn.close()
 
-    if not segments:
+    if not segments or not buckets:
         st.info("No segments found for selected filters.")
         return
 

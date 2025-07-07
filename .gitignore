@@ -1,2 +1,5 @@
 venv
 data
+.DS_store
+compressed
+uncompressed
