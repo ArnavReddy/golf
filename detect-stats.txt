@@ -1,0 +1,25 @@
+|---------------------------------------------------------
+|DOWNSAMPLE = 24
+|📊 Segmentation Summary:
+|  • IMG_7432: correct=3, added=0, missed=0
+|  • IMG_7433: correct=3, added=1, missed=0
+|  • IMG_7434: correct=7, added=3, missed=0
+|  • IMG_7435: correct=6, added=4, missed=1
+|  • IMG_7436: correct=11, added=11, missed=1
+|────────────────────────────
+|  Total correct segments:         30
+|  Total incorrectly added:        19
+|  Total manually missed segments: 2
+|---------------------------------------------------------
+|DOWNSAMPLE = 4
+|📊 Segmentation Summary:
+|  • IMG_7432: correct=3, added=0, missed=0
+|  • IMG_7433: correct=3, added=0, missed=0
+|  • IMG_7434: correct=7, added=2, missed=0
+|  • IMG_7435: correct=7, added=0, missed=0
+|  • IMG_7436: correct=12, added=7, missed=0
+|────────────────────────────
+|  Total correct segments:         32
+|  Total incorrectly added:        9
+|  Total manually missed segments: 0
+|---------------------------------------------------------
