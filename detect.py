@@ -1,28 +1,41 @@
+#!/usr/bin/env python3
 import cv2
 import numpy as np
 from scipy.signal import find_peaks
-
 import subprocess
 from pathlib import Path
 
-def compute_motion_series(video_path, downsample=2):
-    """
-    Reads the video, optionally downsamples by 'downsample' factor for speed,
-    and returns (times, mags) where mags[i] is the mean flow magnitude at time times[i].
-    """
-    cap = cv2.VideoCapture(str(video_path))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+# ── CONFIG ─────────────────────────────────────────────────────────────
+COMPRESSED_DIR    = Path("compressed")
+SWINGS_DIR        = Path("swings")
+SWINGS_DIR.mkdir(exist_ok=True)
+DOWNSAMPLE_FACTOR = 4         # skip every 4th frame to speed up
+EDGE_TRIM_PCT     = 0.0258    # cut first/last 2.58%
+MIN_SEP_SEC       = 20.0      # minimum seconds between impacts
+WINDOW_SEC        = 10.0      # seconds before & after impact
+
+# ── UTILITIES ──────────────────────────────────────────────────────────
+def get_video_duration(path: Path) -> float:
+    cap = cv2.VideoCapture(str(path))
+    fps         = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    return frame_count / fps
+
+def compute_motion_series(video_path: Path, downsample: int):
+    """Return (times, mags) for average optical-flow magnitude per sampled frame."""
+    cap      = cv2.VideoCapture(str(video_path))
+    fps      = cap.get(cv2.CAP_PROP_FPS)
     prev_gray = None
-    frame_idx = 0
+    idx      = 0
     times, mags = [], []
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        # skip frames to speed up
-        if frame_idx % downsample != 0:
-            frame_idx += 1
+        if idx % downsample != 0:
+            idx += 1
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -34,47 +47,75 @@ def compute_motion_series(video_path, downsample=2):
             )
             mag, _ = cv2.cartToPolar(flow[...,0], flow[...,1])
             mags.append(mag.mean())
-            times.append(frame_idx / fps)
+            times.append(idx / fps)
+
         prev_gray = gray
-        frame_idx += 1
+        idx += 1
 
     cap.release()
     return np.array(times), np.array(mags)
 
-# compute
-# times, mags = compute_motion_series("data/recordings/IMG_7432.mp4", downsample=4)
+def detect_impacts(times, mags, percentile=95, min_sep=MIN_SEP_SEC):
+    """Pick peaks in mags above the given percentile, then enforce min separation."""
+    if len(mags) < 2:
+        return np.array([])
+    thr = np.percentile(mags, percentile)
+    # distance in samples
+    sample_interval = times[1] - times[0]
+    min_dist_samples = int(1 / sample_interval)
+    peaks, _ = find_peaks(mags, height=thr, distance=min_dist_samples)
 
-# # pick a threshold at, say, the 95th percentile of all motion
-# thr = np.percentile(mags, 95)
+    print(f"Before separation = {times[peaks]}")
 
-# # require peaks to be at least 1s apart (fps thresholds)
-# min_dist_sec = 1.0
-# min_dist = int(min_dist_sec / (times[1] - times[0]))
+    # now enforce true time separation
+    out = []
+    last_t = -min_sep
+    for p in peaks:
+        t = times[p]
+        if t - last_t >= min_sep:
+            out.append(t)
+            last_t = t
+    return np.array(out)
 
-# peaks, _ = find_peaks(mags, height=thr, distance=min_dist)
+# ── MAIN LOOP ──────────────────────────────────────────────────────────
+def main():
+    for video in COMPRESSED_DIR.glob("*.mp4"):
+        print(f"\n▶️ Processing {video.name}")
+        dur = get_video_duration(video)
+        print(f"   Duration: {dur:.2f}s")
 
-# impact_times = times[peaks]
-impact_times = np.array([
-    0.53333333, 1.6, 2.53333333, 4.53333333, 5.6,
-    8.0, 88.53333333, 190.13333333, 290.53333333,
-    303.73333333, 304.8, 307.6, 308.53333333, 310.0
-])
-print("Detected impacts at:", impact_times)
+        # 1) compute motion series
+        times, mags = compute_motion_series(video, downsample=DOWNSAMPLE_FACTOR)
 
-PREVIEW_DIR = Path("swings")
-PREVIEW_DIR.mkdir(exist_ok=True)
+        # 2) detect impacts
+        impacts = detect_impacts(times, mags)
+        print(f"   Raw impacts: {impacts}")
 
-for i, t in enumerate(impact_times):
-    start = max(0, t - 10.0)
-    dur   = 20.0
-    out = PREVIEW_DIR / f"swing_{i+1:02d}_{start:.1f}s.mp4"
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-ss", f"{start:.3f}",
-        "-i", "data/recordings/IMG_7432.mp4",
-        "-t", f"{dur:.3f}",
-        "-c", "copy",  # if you want frame‐exact, switch to re-encode as before
-        str(out)
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Wrote", out)
+        # 3) trim out those within first/last EDGE_TRIM_PCT
+        edge_start = dur * EDGE_TRIM_PCT
+        edge_end   = dur * (1 - EDGE_TRIM_PCT)
+        impacts = impacts[(impacts >= edge_start) & (impacts <= edge_end)]
+        print(f"   After edge trim: {impacts}")
+        print(f"   Final impacts: {impacts}")
 
+        # 5) slice out windows
+        for i, t in enumerate(impacts, start=1):
+            start_time = max(0.0, t - WINDOW_SEC)
+            out_name   = f"{video.stem}_{i:02d}_{start_time:.1f}s.mp4"
+            out_path   = SWINGS_DIR / out_name
+            print(f"    • Writing {out_name} (impact@{t:.2f}s)")
+
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-ss", f"{start_time:.3f}",
+                "-i", str(video),
+                "-t",  f"{2*WINDOW_SEC:.3f}",
+                "-c",  "copy",
+                str(out_path)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        break
+
+    print("\n✅ All done! Clips saved to ./swings/")
+
+if __name__ == "__main__":
+    main()
