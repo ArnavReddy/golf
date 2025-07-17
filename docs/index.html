@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Golf Swings Review</title>
+  <style>
+    body { font-family: sans-serif; margin: 1rem; }
+    select { font-size: 1rem; margin-bottom: 1rem; }
+    .video-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .clip { width: 320px; }
+    video { width: 100%; height: auto; border: 1px solid #ccc; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Golf Swing Clips</h1>
+  <label for="bucketFilter">Filter by bucket:</label>
+  <select id="bucketFilter">
+    <option value="__all__">All</option>
+    <option value="iron">iron</option>
+  </select>
+  <div class="video-grid">
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_189700_209700.mp4" controls preload="metadata"></video><div>iron / seg_189700_209700.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_375500_395500.mp4" controls preload="metadata"></video><div>iron / seg_375500_395500.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_536400_556400.mp4" controls preload="metadata"></video><div>iron / seg_536400_556400.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_749900_769900.mp4" controls preload="metadata"></video><div>iron / seg_749900_769900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_962000_982000.mp4" controls preload="metadata"></video><div>iron / seg_962000_982000.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_1233900_1253900.mp4" controls preload="metadata"></video><div>iron / seg_1233900_1253900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_1446300_1466300.mp4" controls preload="metadata"></video><div>iron / seg_1446300_1466300.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_1623900_1643900.mp4" controls preload="metadata"></video><div>iron / seg_1623900_1643900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_1832900_1852900.mp4" controls preload="metadata"></video><div>iron / seg_1832900_1852900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_2031900_2051900.mp4" controls preload="metadata"></video><div>iron / seg_2031900_2051900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_2267900_2287900.mp4" controls preload="metadata"></video><div>iron / seg_2267900_2287900.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_2440700_2460700.mp4" controls preload="metadata"></video><div>iron / seg_2440700_2460700.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_2692500_2712500.mp4" controls preload="metadata"></video><div>iron / seg_2692500_2712500.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_2982800_3002800.mp4" controls preload="metadata"></video><div>iron / seg_2982800_3002800.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_3194500_3214500.mp4" controls preload="metadata"></video><div>iron / seg_3194500_3214500.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_3376500_3396500.mp4" controls preload="metadata"></video><div>iron / seg_3376500_3396500.mp4</div></div>
+    <div class="clip" data-bucket="iron"><video src="videos/iron/seg_3562100_3582100.mp4" controls preload="metadata"></video><div>iron / seg_3562100_3582100.mp4</div></div>
+  </div>
+  <script>
+    const filter = document.getElementById('bucketFilter');
+    filter.addEventListener('change', () => {
+      const sel = filter.value;
+      document.querySelectorAll('.clip').forEach(div => {
+        div.classList.toggle('hidden',
+          sel !== '__all__' && div.dataset.bucket !== sel
+        );
+      });
+    });
+  </script>
+</body>
+</html>
