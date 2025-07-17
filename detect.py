@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import cv2
 import numpy as np
@@ -7,6 +8,7 @@ import subprocess
 import sqlite3
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── CONFIG ─────────────────────────────────────────────────────────────
 COMPRESSED_DIR    = Path("compressed")
@@ -92,79 +94,89 @@ def detect_impacts(times, mags, percentile=95, min_sep=MIN_SEP_SEC):
 #     return windows
 
 # ── MAIN ────────────────────────────────────────────────────────────────
+
+def process_one_video(video: Path, all_results):
+    stem = video.stem
+    already = list(SWINGS_DIR.glob(f"{stem}_*.mp4"))
+    if already:
+        print(f"↷ Skipping {video.name}: {len(already)} clip(s) already exist.")
+        return
+    print(f"\n▶️ Processing {video.name}")
+    dur = get_video_duration(video)
+    print(f"   Duration: {dur:.2f}s")
+    # 1) detect if not debugging
+    times, mags = compute_motion_series(video, downsample=DOWNSAMPLE_FACTOR)
+    impacts = detect_impacts(times, mags)
+    # 2) trim edges
+    lo, hi = dur * EDGE_TRIM_PCT, dur*(1-EDGE_TRIM_PCT)
+    impacts = impacts[(impacts>=lo)&(impacts<=hi)]
+    print(f"   Predicted impacts: {impacts.tolist()}")
+    # # 4) load manual windows
+    # manual = load_manual_windows(stem)
+    # print(f"   Manual windows:    {manual}")
+    # # 5) classify
+    # correct, added = [], []
+    # for t in impacts:
+    #     if any(s <= t <= e for (s,e) in manual):
+    #         correct.append(t)
+    #     else:
+    #         added.append(t)
+    # missed = []
+    # for (s,e) in manual:
+    #     if not any(s <= t <= e for t in impacts):
+    #         missed.append((s,e))
+    # # store results
+    # all_results[stem] = {
+    #     "correct": sorted(correct),
+    #     "added":   sorted(added),
+    #     "missed":  sorted(missed),
+    # }
+    # 6) write out clips
+    swing_dir = SWINGS_DIR
+    for i, t in enumerate(impacts, start=1):
+        start_time = max(0, t - WINDOW_SEC)
+        out_name   = f"{stem}_{i:02d}_{start_time:.1f}s.mp4"
+        out_path   = swing_dir / out_name
+        subprocess.run([
+            "ffmpeg","-y",
+            "-ss", f"{start_time:.3f}",
+            "-i", str(video),
+            "-t",  f"{2*WINDOW_SEC:.3f}",
+            "-c",  "copy",
+            str(out_path)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"   Wrote {len(impacts)} swing clips to {swing_dir}/")
+    # ── SUMMARY ─────────────────────────────────────────────────────────────
+    # print("\n📊 Segmentation Summary:")
+    # total_correct = total_added = total_missed = 0
+    # for stem, res in all_results.items():
+    #     c, a, m = len(res["correct"]), len(res["added"]), len(res["missed"])
+    #     total_correct += c
+    #     total_added   += a
+    #     total_missed  += m
+    #     print(f"  • {stem}: correct={c}, added={a}, missed={m}")
+    # print("────────────────────────────")
+    # print(f"  Total correct segments:         {total_correct}")
+    # print(f"  Total incorrectly added:        {total_added}")
+    # print(f"  Total manually missed segments: {total_missed}")
 def auto_segment_all():
-    # all_results = {}  # video_stem → { correct, added, missed }
+    all_results = {}  # video_stem → { correct, added, missed }
 
-    for video in COMPRESSED_DIR.glob("*.mp4"):
-        stem = video.stem
-        already = list(SWINGS_DIR.glob(f"{stem}_*.mp4"))
-        if already:
-            print(f"↷ Skipping {video.name}: {len(already)} clip(s) already exist.")
-            continue
-        print(f"\n▶️ Processing {video.name}")
-        dur = get_video_duration(video)
-        print(f"   Duration: {dur:.2f}s")
+    videos = list(COMPRESSED_DIR.glob("*.mp4"))
+    if not videos:
+        print("No videos found in", COMPRESSED_DIR)
+        return
 
-        # 1) detect if not debugging
-        times, mags = compute_motion_series(video, downsample=DOWNSAMPLE_FACTOR)
-        impacts = detect_impacts(times, mags)
-        # 2) trim edges
-        lo, hi = dur * EDGE_TRIM_PCT, dur*(1-EDGE_TRIM_PCT)
-        impacts = impacts[(impacts>=lo)&(impacts<=hi)]
-        print(f"   Predicted impacts: {impacts.tolist()}")
-
-        # # 4) load manual windows
-        # manual = load_manual_windows(stem)
-        # print(f"   Manual windows:    {manual}")
-
-        # # 5) classify
-        # correct, added = [], []
-        # for t in impacts:
-        #     if any(s <= t <= e for (s,e) in manual):
-        #         correct.append(t)
-        #     else:
-        #         added.append(t)
-        # missed = []
-        # for (s,e) in manual:
-        #     if not any(s <= t <= e for t in impacts):
-        #         missed.append((s,e))
-
-        # # store results
-        # all_results[stem] = {
-        #     "correct": sorted(correct),
-        #     "added":   sorted(added),
-        #     "missed":  sorted(missed),
-        # }
-
-        # 6) write out clips
-        swing_dir = SWINGS_DIR
-        for i, t in enumerate(impacts, start=1):
-            start_time = max(0, t - WINDOW_SEC)
-            out_name   = f"{stem}_{i:02d}_{start_time:.1f}s.mp4"
-            out_path   = swing_dir / out_name
-            subprocess.run([
-                "ffmpeg","-y",
-                "-ss", f"{start_time:.3f}",
-                "-i", str(video),
-                "-t",  f"{2*WINDOW_SEC:.3f}",
-                "-c",  "copy",
-                str(out_path)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"   Wrote {len(impacts)} swing clips to {swing_dir}/")
-
-        # ── SUMMARY ─────────────────────────────────────────────────────────────
-        # print("\n📊 Segmentation Summary:")
-        # total_correct = total_added = total_missed = 0
-        # for stem, res in all_results.items():
-        #     c, a, m = len(res["correct"]), len(res["added"]), len(res["missed"])
-        #     total_correct += c
-        #     total_added   += a
-        #     total_missed  += m
-        #     print(f"  • {stem}: correct={c}, added={a}, missed={m}")
-        # print("────────────────────────────")
-        # print(f"  Total correct segments:         {total_correct}")
-        # print(f"  Total incorrectly added:        {total_added}")
-        # print(f"  Total manually missed segments: {total_missed}")
+    print(f"Starting segmentation using up to {os.cpu_count()} threads...")
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as exe:
+        futures = { exe.submit(process_one_video, v, all_results): v for v in videos }
+        for fut in as_completed(futures):
+            vid = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"⚠️  Error processing {vid.name}: {e}")
+        
     print("\n✅ All done! Clips saved to ./swings/")
 # ── REVIEW GUI (PyQt5) ───────────────────────────────────────────────────
 from PyQt5.QtWidgets import (
@@ -173,7 +185,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
-from PyQt5.QtCore import QUrl
+from PyQt5.QtCore import QUrl, QTimer
 
 def init_db():
     DATA_DIR.mkdir(exist_ok=True)
@@ -212,7 +224,34 @@ def list_buckets():
     names = [r[0] for r in c.fetchall()]
     conn.close()
     return names
+class PreviewWindow(QMainWindow):
+    def __init__(self, video_path: Path, start_time: float, duration: float = 30.0):
+        super().__init__()
+        self.setWindowTitle("▶ Next 30s Preview")
+        # central widget
+        w = QWidget()
+        self.setCentralWidget(w)
+        v = QVBoxLayout(w)
 
+        # video player
+        self.player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+        vw = QVideoWidget()
+        self.player.setVideoOutput(vw)
+        v.addWidget(vw)
+
+        # load and seek
+        url = QUrl.fromLocalFile(str(video_path.absolute()))
+        print(url)
+        self.player.setPlaybackRate(10.0)
+        self.player.setMedia(QMediaContent(url))
+        
+        self.player.setPosition(int(start_time * 1000))
+        self.player.play()
+    def closeEvent(self, event):
+        # stop playback and clear media so audio really stops
+        self.player.stop()
+        self.player.setMedia(QMediaContent())  # optional, releases the file
+        super().closeEvent(event)
 class ReviewWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -260,6 +299,10 @@ class ReviewWindow(QMainWindow):
         self.skip_btn = QPushButton("⏭ Skip")
         self.skip_btn.clicked.connect(self.skip_clip)
         row.addWidget(self.skip_btn)
+
+        self.next30_btn = QPushButton("▶ Next 30s")
+        self.next30_btn.clicked.connect(self.preview_next)
+        row.addWidget(self.next30_btn)
 
         self.load_current()
 
@@ -334,6 +377,30 @@ class ReviewWindow(QMainWindow):
         """Just move on to the next clip without deleting or saving."""
         self.idx += 1
         self.load_current()
+    def preview_next(self):
+        """
+        Open a tiny popup that plays 30s immediately after this segment,
+        so you can see your finger-signals without altering the clip itself.
+        """
+        self.toggle_play()
+        clip = self.current
+        stem, _, start_s = clip.stem.rsplit("_", 2)
+        start = float(start_s.rstrip("s"))
+        # segment length was 2*WINDOW_SEC, so end_of_segment = start + window
+        end_of_segment = start + 2 * WINDOW_SEC
+
+        # original source lives in COMPRESSED_DIR
+        orig = COMPRESSED_DIR / f"{stem}.mp4"
+        if not orig.exists():
+            QMessageBox.warning(self, "Missing original",
+                                f"Couldn't find {orig}")
+            return
+
+        preview = PreviewWindow(orig, end_of_segment, duration=30.0)
+        preview.resize(640, 360)
+        preview.show()
+        # keep a ref so it doesn't get garbage-collected
+        self._preview_win = preview
 
 if __name__ == "__main__":
     auto_segment_all()
