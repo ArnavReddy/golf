@@ -149,7 +149,7 @@ def main():
 
     print("\n→ To publish on GitHub Pages:")
     print("  1) Push to GitHub, then in your repo Settings → Pages → Source select `docs/` branch.")
-    print("  2) Your site will be live at `https://<your-user>.github.io/<your-repo>/`.")
+    print("  2) Your site will be live at `https://arnavreddy.github.io/golf/`.")
 
 if __name__ == "__main__":
     main()
